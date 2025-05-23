@@ -9,12 +9,7 @@ from dotenv import load_dotenv
 import requests
 import json
 
-load_dotenv(dotenv_path=r"c:\Users\checc\OneDrive\Desktop\F1 Predicts\.env")
-
-
-print("CITY:", os.getenv("CITY_NAME"))
-print("UNITS:", os.getenv("UNITS"))
-  
+load_dotenv(dotenv_path=r"F1 Predicts\.env")
 
 api_key = os.getenv("WEATHER_API_KEY")
 city = os.getenv("CITY_NAME")
