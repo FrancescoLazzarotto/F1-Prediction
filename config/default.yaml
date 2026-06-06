@@ -1,0 +1,37 @@
+cache:
+  fastf1_dir: ".cache/fastf1"
+  features_dir: ".cache/features"
+  models_dir: ".cache/models"
+
+training:
+  seasons: [2023, 2024, 2025]
+  min_laps_long_run: 5      # minimum consecutive laps to count as a long run stint
+
+models:
+  default: "gradient_boosting"
+  gradient_boosting:
+    n_estimators: 200
+    learning_rate: 0.05
+    max_depth: 4
+    subsample: 0.8
+    min_samples_leaf: 3
+    random_state: 42
+  xgboost:
+    n_estimators: 200
+    learning_rate: 0.05
+    max_depth: 4
+    subsample: 0.8
+    random_state: 42
+
+monte_carlo:
+  n_simulations: 2000
+  position_noise_std: 3.0   # std dev (positions) added to predicted rank
+
+form:
+  recent_races: 5           # races looked back for rolling driver/team form
+
+features:
+  use_weather: true
+  use_tyre: true
+  use_long_run: true
+  use_circuit_history: true
