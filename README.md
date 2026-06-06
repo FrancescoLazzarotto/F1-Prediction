@@ -1,63 +1,105 @@
 # F1-Prediction
 
-## Overview
+Modular, multi-race Formula 1 predictor powered entirely by **free, open APIs** — no API keys required.
 
-This project focuses on building **machine learning models** to predict outcomes in **Formula 1** races.  
-By leveraging **historical race data** and **driver statistics**, the goal is to identify patterns and performance indicators that influence race results.
+## What it does
 
----
+Two-stage prediction pipeline:
 
-## Objectives
+1. **Free Practice → Qualifying prediction** — extracts long-run pace, best laps, and sector times from FP sessions to forecast the qualifying order before the session happens.
+2. **Qualifying → Race prediction** — combines grid position, driver and team form (last N races), circuit history, and weather forecast to predict the race finishing order and compute win/podium probabilities via Monte Carlo simulation.
 
-The project is structured around two core predictive tasks:
+## Data sources (all free, no keys)
 
-### 1. Podium Prediction (Binary Classification)
-- Task: Predict whether a driver will finish **in the top 3 positions** (i.e., achieve a podium finish).
+| Source | What it provides |
+|---|---|
+| [FastF1 3.8+](https://docs.fastf1.dev/) | FP/Quali/Race sessions, lap times, telemetry, entry lists |
+| [Jolpica-F1](https://api.jolpi.ca/ergast/f1/) | Historical results, standings, circuit info (Ergast successor) |
+| [Open-Meteo](https://open-meteo.com/) | Weather — historical archive + 16-day forecast, no key needed |
 
-### 2. Final Position Prediction (Multiclass Classification)
-- Task: Predict the **exact finishing position** of each driver in a given race, generating a full driver ranking.
+## Setup
 
----
+```bash
+pip install -e .
+```
 
-## Scope and Methodology
+First run downloads session data into `.cache/` (takes several minutes). Subsequent runs are instant.
 
-The following steps are implemented in the project:
+## Usage
 
-- **Data Preprocessing and Cleaning**
-  - Handling missing values, inconsistent records, and outliers
-  - Normalization and transformation of relevant metrics
+### CLI
 
-- **Feature Engineering**
-  - Construction of new variables to capture:
-    - Driver form (recent performance)
-    - Team and car performance
-    - Track-specific history
-    - Weather or qualifying session results (if available)
+```bash
+# Predict next upcoming race
+f1predict predict --next
 
-- **Model Training and Evaluation**
-  - Application of various classification algorithms
-  - Cross-validation and hyperparameter tuning
-  - Evaluation using appropriate metrics (e.g., accuracy, F1-score, ranking correlation)
+# Predict a specific race (full output: order + podium probabilities)
+f1predict predict --year 2026 --round 10
 
-- **Model Comparison**
-  - Assessing the effectiveness of different models on **real-world race data**
-  - Analysis of overfitting, generalization, and feature importance
+# Predict by GP name
+f1predict predict --year 2026 --gp "Monza"
 
----
+# Predict qualifying order from FP data only
+f1predict quali --year 2026 --gp Silverstone
 
-## Technologies Used
+# Train / retrain models on specific seasons
+f1predict train 2023 2024 2025
 
-- Python (Pandas, Scikit-learn, XGBoost, etc.)
-- Jupyter Notebooks for development and analysis
-- CSV datasets containing historical F1 race data
+# Evaluate accuracy on a past race
+f1predict backtest 2024 3
+```
 
----
+### Web UI (Streamlit)
 
-## Learning Outcomes
+```bash
+streamlit run app/streamlit_app.py
+```
 
-This project provides insights into:
+Opens a browser with season/GP dropdowns, race prediction table, and a podium probability chart. Language toggle (EN/IT) in the sidebar.
 
-- Predictive modeling for sports analytics
-- Advanced classification techniques (binary and multiclass)
-- Feature extraction and engineering from time-series data
-- Evaluation of models on imbalanced or competitive datasets
+## Architecture
+
+```
+src/f1predict/
+  config.py               — YAML + .env config loader
+  cache.py                — FastF1 cache + parquet feature store + model store
+  data/
+    schedule.py           — Resolve "next race", year/round, GP name
+    fastf1_source.py      — Load FP/Quali/Race sessions and lap data
+    jolpica_source.py     — Historical results and circuit info
+    weather_source.py     — Open-Meteo historical + forecast weather
+  features/
+    practice.py           — FP best lap, long-run pace, sector times
+    qualifying.py         — Grid position, gap to pole
+    form.py               — Rolling driver/team form, circuit history
+    builder.py            — Assemble and cache the full feature matrix
+  models/
+    base.py               — Predictor interface
+    quali_model.py        — GradientBoosting: FP features → quali position
+    race_model.py         — GradientBoosting: grid + form + weather → race pos + MC proba
+    registry.py           — Model instantiation from config
+  pipeline.py             — Orchestration: train / predict_race / predict_quali / backtest
+  i18n.py                 — EN/IT strings for the UI
+  cli.py                  — Typer CLI (predict, quali, train, backtest)
+app/
+  streamlit_app.py        — Streamlit web UI
+config/
+  default.yaml            — Training seasons, model hyperparameters, cache paths
+tests/                    — pytest unit tests
+Dataset/                  — Legacy Ergast CSVs (kept as offline fallback)
+```
+
+## Running tests
+
+```bash
+pytest tests/ -v
+```
+
+## Configuration
+
+Edit `config/default.yaml` to change:
+- `training.seasons` — which seasons to train on (default: 2023, 2024, 2025)
+- `models.gradient_boosting.*` — model hyperparameters
+- `monte_carlo.n_simulations` — number of simulations for probability estimates
+- `form.recent_races` — rolling window for driver form (default: 5)
+- `cache.*_dir` — cache directory locations (or set `F1PREDICT_CACHE_DIR` env var)
