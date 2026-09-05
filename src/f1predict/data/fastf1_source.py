@@ -1,110 +1,176 @@
-"""FastF1 data source: sessions, laps, results, driver info."""
+"""FastF1 data source: practice laps, entry lists, session results.
+
+FastF1 talks to the live timing archive, which is slow and occasionally
+unavailable, so everything here degrades to ``None``/empty rather than raising.
+"""
 
 from __future__ import annotations
 
 import logging
 import warnings
+from dataclasses import dataclass
 
-import fastf1
 import pandas as pd
 
 log = logging.getLogger(__name__)
 
-# Suppress verbose fastf1 INFO logs
+# FastF1 logs one INFO line per cached file, which drowns out our own output.
 logging.getLogger("fastf1").setLevel(logging.WARNING)
 
+#: Practice sessions in descending order of how representative they are of
+#: qualifying pace: FP2 carries the low-fuel runs on a conventional weekend,
+#: FP3 is the final dry-run before quali, FP1 is usually programme work.
+PRACTICE_PREFERENCE: tuple[str, ...] = ("FP2", "FP3", "FP1")
 
-def load_session(year: int, round_num: int, session_name: str) -> fastf1.core.Session | None:
-    """
-    Load a FastF1 session with laps but without full telemetry.
-    Returns None on failure (network error, session not found, etc.).
-    """
+#: On a sprint weekend there is a single practice session before parc fermé.
+SPRINT_PRACTICE_PREFERENCE: tuple[str, ...] = ("FP1",)
+
+ENTRY_COLUMNS = ["driver_code", "driver_id", "driver_name", "team", "driver_number"]
+
+
+@dataclass(frozen=True, slots=True)
+class PracticeData:
+    """Laps from the practice session we chose, plus which one it was."""
+
+    session_name: str
+    laps: pd.DataFrame
+
+
+def load_session(year: int, round_num: int, session_name: str, *, laps: bool = True):
+    """Load one session, returning ``None`` on any failure."""
     try:
+        import fastf1
+
         session = fastf1.get_session(year, round_num, session_name)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            session.load(laps=True, telemetry=False, weather=True, messages=False)
+            session.load(laps=laps, telemetry=False, weather=False, messages=False)
         return session
     except Exception as exc:
-        log.warning("Could not load %d R%d %s: %s", year, round_num, session_name, exc)
+        log.debug("Could not load %d R%d %s: %s", year, round_num, session_name, exc)
         return None
 
 
-def get_fp_laps(year: int, round_num: int) -> pd.DataFrame | None:
-    """
-    Load FP laps (tries FP2, then FP3, then FP1 in order of representativeness).
-    Returns a DataFrame with columns: Driver, LapTime, Stint, Compound,
-    TyreLife, IsAccurate, PitOutLap, PitInLap, Sector1Time, Sector2Time,
-    Sector3Time, TrackStatus.
-    """
-    for session_name in ("FP2", "FP3", "FP1"):
-        session = load_session(year, round_num, session_name)
+def get_practice_laps(
+    year: int, round_num: int, sprint_weekend: bool = False
+) -> PracticeData | None:
+    """Laps from the most representative practice session that has data."""
+    preference = SPRINT_PRACTICE_PREFERENCE if sprint_weekend else PRACTICE_PREFERENCE
+    for name in preference:
+        session = load_session(year, round_num, name)
         if session is None:
             continue
-        laps = session.laps
+        laps = getattr(session, "laps", None)
         if laps is None or len(laps) == 0:
             continue
-        log.info("Using %s for FP features (%d R%d)", session_name, year, round_num)
-        return laps.copy()
+        log.info("Using %s for practice features (%d R%d)", name, year, round_num)
+        return PracticeData(session_name=name, laps=laps.copy())
     return None
 
 
-def get_quali_laps(year: int, round_num: int) -> fastf1.core.Session | None:
-    """Load the Qualifying session (used to verify quali predictions)."""
-    return load_session(year, round_num, "Q")
+def get_entry_list(year: int, round_num: int) -> pd.DataFrame:
+    """Drivers entered for an event.
 
-
-def get_race_session(year: int, round_num: int) -> fastf1.core.Session | None:
-    """Load the Race session."""
-    return load_session(year, round_num, "R")
-
-
-def get_race_results(year: int, round_num: int) -> pd.DataFrame | None:
+    Tries sessions from latest to earliest so that a completed weekend uses the
+    race classification and an upcoming one still finds the practice entry list.
     """
-    Get race results from FastF1 with columns:
-    driver_code, driver_name, team, grid_pos, race_pos, points, status.
-    """
-    session = get_race_session(year, round_num)
-    if session is None:
-        return None
-    results = session.results
+    for session_name in ("R", "Q", "SQ", "FP3", "FP2", "FP1"):
+        session = load_session(year, round_num, session_name, laps=False)
+        results = getattr(session, "results", None) if session is not None else None
+        if results is None or len(results) == 0:
+            continue
+        return _results_to_entries(results)
+
+    return pd.DataFrame({c: pd.Series(dtype="object") for c in ENTRY_COLUMNS})
+
+
+def _results_to_entries(results: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for _, row in results.iterrows():
+        abbreviation = str(row.get("Abbreviation", "") or "")
+        driver_id = str(row.get("DriverId", "") or abbreviation).lower()
+        full_name = str(row.get("FullName", "") or row.get("BroadcastName", "") or abbreviation)
+        rows.append({
+            "driver_code": abbreviation,
+            "driver_id": driver_id,
+            "driver_name": full_name,
+            "team": str(row.get("TeamName", "") or ""),
+            "driver_number": str(row.get("DriverNumber", "") or ""),
+        })
+    df = pd.DataFrame(rows, columns=ENTRY_COLUMNS)
+    return df[df["driver_code"].astype(bool)].drop_duplicates("driver_code").reset_index(drop=True)
+
+
+def get_session_results(year: int, round_num: int, session_name: str) -> pd.DataFrame:
+    """Classification for a session as a tidy frame, or empty on failure."""
+    session = load_session(year, round_num, session_name, laps=False)
+    results = getattr(session, "results", None) if session is not None else None
     if results is None or len(results) == 0:
-        return None
+        return pd.DataFrame()
 
     rows = []
     for _, row in results.iterrows():
         rows.append({
-            "driver_code": row.get("Abbreviation", "???"),
-            "driver_name": str(row.get("FullName", row.get("BroadcastName", ""))),
-            "team": str(row.get("TeamName", "")),
-            "grid_pos": int(row.get("GridPosition", 20) or 20),
-            "race_pos": int(row.get("Position", 20) or 20),
-            "points": float(row.get("Points", 0) or 0),
-            "status": str(row.get("Status", "")),
-            "driver_id": str(row.get("DriverId", row.get("Abbreviation", ""))).lower(),
+            "driver_code": str(row.get("Abbreviation", "") or ""),
+            "driver_name": str(row.get("FullName", "") or ""),
+            "team": str(row.get("TeamName", "") or ""),
+            "position": _safe_int(row.get("Position")),
+            "grid_pos": _safe_int(row.get("GridPosition")),
+            "points": _safe_float(row.get("Points")),
+            "status": str(row.get("Status", "") or ""),
         })
     return pd.DataFrame(rows)
 
 
-def get_entry_list(year: int, round_num: int) -> pd.DataFrame:
+def get_session_weather(year: int, round_num: int, session_name: str = "R") -> dict | None:
+    """Measured trackside weather, averaged over a session.
+
+    Only available once a session has run; used to ground-truth the forecast
+    when backtesting.
     """
-    Return the list of drivers entered for this event.
-    Columns: driver_code, driver_name, team, driver_number.
-    Falls back to qualifying or practice sessions if race not available.
+    session = load_session(year, round_num, session_name, laps=False)
+    if session is None:
+        return None
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            session.load(laps=False, telemetry=False, weather=True, messages=False)
+        weather = session.weather_data
+    except Exception:
+        return None
+
+    if weather is None or len(weather) == 0:
+        return None
+
+    return {
+        "temperature": float(weather["AirTemp"].mean()),
+        "track_temp": float(weather["TrackTemp"].mean()),
+        "humidity": float(weather["Humidity"].mean()),
+        "wind_speed": float(weather["WindSpeed"].mean()),
+        "rain_prob": float(weather["Rainfall"].mean()),
+        "cloud_cover": 50.0,
+        "source": "measured",
+    }
+
+
+def _safe_int(value, default: int | None = None) -> int | None:
+    """Parse a FastF1 numeric cell, which is NaN for non-starters.
+
+    ``int(value or default)`` is wrong here: NaN is truthy, so it survives the
+    ``or`` and then blows up inside ``int()``.
     """
-    for sess_name in ("R", "Q", "FP2", "FP1"):
-        session = load_session(year, round_num, sess_name)
-        if session is None or session.results is None or len(session.results) == 0:
-            continue
-        results = session.results
-        rows = []
-        for _, row in results.iterrows():
-            rows.append({
-                "driver_code": row.get("Abbreviation", "???"),
-                "driver_name": str(row.get("FullName", row.get("BroadcastName", ""))),
-                "team": str(row.get("TeamName", "")),
-                "driver_number": str(row.get("DriverNumber", "")),
-                "driver_id": str(row.get("DriverId", row.get("Abbreviation", ""))).lower(),
-            })
-        return pd.DataFrame(rows)
-    return pd.DataFrame(columns=["driver_code", "driver_name", "team", "driver_number", "driver_id"])
+    if value is None or pd.isna(value):
+        return default
+    try:
+        return int(float(value))
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    if value is None or pd.isna(value):
+        return default
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return default
