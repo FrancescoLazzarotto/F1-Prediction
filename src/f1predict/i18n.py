@@ -1,77 +1,197 @@
-"""Minimal bilingual string store (EN / IT) for the Streamlit UI."""
+"""Bilingual UI strings (English / Italian).
+
+Keys missing from a language fall back to English, and a key missing everywhere
+falls back to itself, so a new string never renders as a blank label.
+"""
 
 from __future__ import annotations
 
-STRINGS: dict[str, dict[str, str]] = {
+from typing import Final
+
+LANGUAGES: Final[dict[str, str]] = {"en": "English", "it": "Italiano"}
+
+STRINGS: Final[dict[str, dict[str, str]]] = {
     "en": {
-        "title": "🏎️ F1 Race Predictor",
-        "subtitle": "Real-time predictions powered by FastF1 · Jolpica · Open-Meteo",
-        "select_year": "Season",
-        "select_gp": "Grand Prix",
-        "predict_btn": "Predict",
-        "train_btn": "Train models",
+        # Shell
+        "app_title": "F1 Race Predictor",
+        "app_tagline": "Two-stage forecasting from free, open data",
+        "language": "Language",
+        "season": "Season",
+        "grand_prix": "Grand Prix",
+        "predict": "Predict race",
+        "train": "Train models",
+        "refresh": "Refresh data",
+        "settings": "Settings",
+        "simulations": "Simulations",
+        # Tabs
         "tab_race": "Race",
         "tab_quali": "Qualifying",
-        "col_pos": "Pos",
-        "col_driver": "Driver",
-        "col_team": "Team",
-        "col_pred_pos": "Predicted",
-        "col_p_win": "P(win)",
-        "col_p_podium": "P(podium)",
-        "col_p_top5": "P(top 5)",
-        "col_quali_pos": "Quali pos",
-        "col_quali_time": "Predicted time",
-        "chart_title": "Podium probability",
-        "loading": "Loading data and running predictions…",
-        "no_model": "No trained model found. Run `f1predict train` first, or click 'Train models'.",
-        "training": "Training models on seasons {}…",
-        "done": "Done!",
-        "backtest_header": "Backtest — {} Round {}",
-        "spearman": "Spearman ρ",
-        "top3_acc": "Top-3 accuracy",
+        "tab_championship": "Championship",
+        "tab_backtest": "Accuracy",
+        "tab_calendar": "Calendar",
+        "tab_model": "Model",
+        # Table headers
+        "pos": "Pos",
+        "driver": "Driver",
+        "team": "Team",
+        "grid": "Grid",
+        "delta": "Δ",
+        "p_win": "Win",
+        "p_podium": "Podium",
+        "p_points": "Points",
+        "p_top5": "Top 5",
+        "p_dnf": "DNF",
+        "expected_points": "Exp. pts",
+        "quali_pos": "Predicted quali",
+        "gap": "Gap",
+        # Race context
         "circuit": "Circuit",
         "race_date": "Race date",
-        "data_source": "Data: FP available — using Practice → Quali prediction | Quali available — using actual grid",
-        "warning_no_fp": "FP data not available for this event.",
-        "warning_no_quali": "Qualifying data not available yet — predicting from FP.",
+        "weather": "Weather",
+        "confidence": "Confidence",
+        "grid_source": "Grid source",
+        "grid_actual": "Actual qualifying result",
+        "grid_predicted": "Predicted from practice",
+        "grid_form": "Form only — no session data",
+        "practice_used": "Practice session used",
+        "rain_risk": "Rain risk",
+        "temperature": "Temperature",
+        "wind": "Wind",
+        # Championship
+        "title_odds": "Title probability",
+        "races_left": "Rounds remaining",
+        "current_points": "Points",
+        "projected_points": "Projected",
+        "drivers_title": "Drivers' championship",
+        "constructors_title": "Constructors' championship",
+        "title_decided": "The championship is mathematically settled.",
+        # Accuracy
+        "spearman": "Rank correlation",
+        "mae": "Mean position error",
+        "winner_hit": "Winner correct",
+        "podium_hit": "Podium hit rate",
+        "within_3": "Within 3 places",
+        "run_backtest": "Run backtest",
+        "backtest_season": "Backtest whole season",
+        # Messages
+        "loading": "Crunching the numbers…",
+        "no_model": "No trained model yet. Click **Train models** to build one.",
+        "training_on": "Training on seasons {}…",
+        "done": "Done",
+        "no_data": "No data available for this event yet.",
+        "no_practice": "No practice data available for this event.",
+        "select_prompt": "Pick a season and a Grand Prix, then hit Predict.",
+        "why": "Why this prediction",
+        "strength": "in their favour",
+        "weakness": "against them",
+        "field_median": "field median",
+        "podium_chart": "Podium probability",
+        "outcome_spread": "Where each driver could finish",
+        "vs": "Head to head",
     },
     "it": {
-        "title": "🏎️ F1 Previsioni Gara",
-        "subtitle": "Previsioni in tempo reale con FastF1 · Jolpica · Open-Meteo",
-        "select_year": "Stagione",
-        "select_gp": "Gran Premio",
-        "predict_btn": "Prevedi",
-        "train_btn": "Allena modelli",
+        # Shell
+        "app_title": "F1 Race Predictor",
+        "app_tagline": "Previsioni a due stadi da dati liberi e aperti",
+        "language": "Lingua",
+        "season": "Stagione",
+        "grand_prix": "Gran Premio",
+        "predict": "Prevedi gara",
+        "train": "Allena modelli",
+        "refresh": "Aggiorna dati",
+        "settings": "Impostazioni",
+        "simulations": "Simulazioni",
+        # Tabs
         "tab_race": "Gara",
         "tab_quali": "Qualifiche",
-        "col_pos": "Pos",
-        "col_driver": "Pilota",
-        "col_team": "Team",
-        "col_pred_pos": "Previsto",
-        "col_p_win": "P(vittoria)",
-        "col_p_podium": "P(podio)",
-        "col_p_top5": "P(top 5)",
-        "col_quali_pos": "Pos. qualifiche",
-        "col_quali_time": "Tempo previsto",
-        "chart_title": "Probabilità podio",
-        "loading": "Caricamento dati e calcolo previsioni…",
-        "no_model": "Nessun modello trovato. Esegui `f1predict train` o clicca 'Allena modelli'.",
-        "training": "Alleno i modelli sulle stagioni {}…",
-        "done": "Fatto!",
-        "backtest_header": "Backtest — {} Round {}",
-        "spearman": "Spearman ρ",
-        "top3_acc": "Accuratezza top-3",
+        "tab_championship": "Mondiale",
+        "tab_backtest": "Accuratezza",
+        "tab_calendar": "Calendario",
+        "tab_model": "Modello",
+        # Table headers
+        "pos": "Pos",
+        "driver": "Pilota",
+        "team": "Team",
+        "grid": "Griglia",
+        "delta": "Δ",
+        "p_win": "Vittoria",
+        "p_podium": "Podio",
+        "p_points": "Punti",
+        "p_top5": "Top 5",
+        "p_dnf": "Ritiro",
+        "expected_points": "Punti att.",
+        "quali_pos": "Qualifica prevista",
+        "gap": "Distacco",
+        # Race context
         "circuit": "Circuito",
         "race_date": "Data gara",
-        "data_source": "Dati: FP disponibili → previsione qualifiche | Qualifiche disponibili → griglia reale",
-        "warning_no_fp": "Dati prove libere non disponibili per questo evento.",
-        "warning_no_quali": "Qualifiche non ancora disponibili — previsione da prove libere.",
+        "weather": "Meteo",
+        "confidence": "Affidabilità",
+        "grid_source": "Origine griglia",
+        "grid_actual": "Qualifiche reali",
+        "grid_predicted": "Prevista dalle libere",
+        "grid_form": "Solo forma — nessun dato di sessione",
+        "practice_used": "Sessione libere usata",
+        "rain_risk": "Probabilità pioggia",
+        "temperature": "Temperatura",
+        "wind": "Vento",
+        # Championship
+        "title_odds": "Probabilità titolo",
+        "races_left": "Gare rimanenti",
+        "current_points": "Punti",
+        "projected_points": "Previsti",
+        "drivers_title": "Mondiale piloti",
+        "constructors_title": "Mondiale costruttori",
+        "title_decided": "Il campionato è matematicamente chiuso.",
+        # Accuracy
+        "spearman": "Correlazione di rango",
+        "mae": "Errore medio di posizione",
+        "winner_hit": "Vincitore corretto",
+        "podium_hit": "Podio indovinato",
+        "within_3": "Entro 3 posizioni",
+        "run_backtest": "Esegui backtest",
+        "backtest_season": "Backtest stagione intera",
+        # Messages
+        "loading": "Sto elaborando i dati…",
+        "no_model": "Nessun modello allenato. Clicca **Allena modelli** per crearlo.",
+        "training_on": "Alleno sulle stagioni {}…",
+        "done": "Fatto",
+        "no_data": "Nessun dato disponibile per questo evento.",
+        "no_practice": "Nessun dato delle prove libere per questo evento.",
+        "select_prompt": "Scegli stagione e Gran Premio, poi premi Prevedi.",
+        "why": "Perché questa previsione",
+        "strength": "a suo favore",
+        "weakness": "a suo sfavore",
+        "field_median": "mediana del gruppo",
+        "podium_chart": "Probabilità di podio",
+        "outcome_spread": "Dove può arrivare ogni pilota",
+        "vs": "Testa a testa",
     },
 }
 
 
 def t(key: str, lang: str = "en", *args) -> str:
-    s = STRINGS.get(lang, STRINGS["en"]).get(key, STRINGS["en"].get(key, key))
-    if args:
-        return s.format(*args)
-    return s
+    """Translate ``key``, falling back to English and then to the key itself."""
+    table = STRINGS.get(lang, STRINGS["en"])
+    text = table.get(key) or STRINGS["en"].get(key, key)
+    return text.format(*args) if args else text
+
+
+def translator(lang: str):
+    """Bind a language, so a caller can write ``_("season")``."""
+    def _t(key: str, *args) -> str:
+        return t(key, lang, *args)
+
+    return _t
+
+
+def grid_source_label(source: str, lang: str = "en") -> str:
+    """Human-readable description of where the grid came from."""
+    return t(
+        {
+            "actual_quali": "grid_actual",
+            "predicted_quali": "grid_predicted",
+            "form_only": "grid_form",
+        }.get(source, "grid_form"),
+        lang,
+    )
