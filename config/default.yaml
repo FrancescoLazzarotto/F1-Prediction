@@ -1,37 +1,77 @@
+# f1predict configuration.
+#
+# Every key here maps onto a dataclass in src/f1predict/config.py — an unknown
+# key is a hard error at load time rather than a silently ignored setting.
+# Override the cache location without editing this file via F1PREDICT_CACHE_DIR.
+
 cache:
-  fastf1_dir: ".cache/fastf1"
-  features_dir: ".cache/features"
-  models_dir: ".cache/models"
+  # Leave `root` empty to use <repo>/.cache. The four sub-directories below are
+  # derived from it unless you set them explicitly.
+  root: ".cache"
+  # How long a cached API response for the *current* season stays fresh.
+  # Completed seasons are immutable and cached forever.
+  live_ttl_s: 21600 # 6 hours
 
 training:
-  seasons: [2023, 2024, 2025]
-  min_laps_long_run: 5      # minimum consecutive laps to count as a long run stint
+  seasons: [2022, 2023, 2024, 2025]
+  # Minimum green-flag laps in a stint for it to count as a long run.
+  min_laps_long_run: 5
+  # Cross-validation folds, grouped by race so no race straddles a split.
+  cv_folds: 5
+  min_samples_for_cv: 60
+  # Recent races get more weight; this is the half-life of that decay.
+  recency_half_life_races: 25.0
 
 models:
-  default: "gradient_boosting"
-  gradient_boosting:
-    n_estimators: 200
-    learning_rate: 0.05
-    max_depth: 4
-    subsample: 0.8
-    min_samples_leaf: 3
-    random_state: 42
-  xgboost:
-    n_estimators: 200
-    learning_rate: 0.05
-    max_depth: 4
-    subsample: 0.8
-    random_state: 42
+  # kind: hist_gradient_boosting | gradient_boosting | random_forest | ridge
+  race:
+    kind: hist_gradient_boosting
+    params:
+      max_iter: 400
+      learning_rate: 0.06
+      max_depth: 5
+      min_samples_leaf: 12
+      l2_regularization: 0.5
+      random_state: 42
+  quali:
+    kind: hist_gradient_boosting
+    params:
+      max_iter: 300
+      learning_rate: 0.07
+      max_depth: 4
+      min_samples_leaf: 10
+      random_state: 42
+  # Retirement classifier — feeds the Monte Carlo, not the finishing order.
+  dnf:
+    kind: gradient_boosting_classifier
+    params:
+      n_estimators: 150
+      learning_rate: 0.05
+      max_depth: 3
+      subsample: 0.9
+      random_state: 42
 
-monte_carlo:
-  n_simulations: 2000
-  position_noise_std: 3.0   # std dev (positions) added to predicted rank
+simulation:
+  n_simulations: 20000
+  # Spread injected per driver per simulated race, in model-score units.
+  position_noise_std: 2.6
+  # Midfield and backmarkers are less predictable than the front row.
+  backmarker_noise_scale: 0.9
+  # Multiplier applied to the spread at 100% rain probability.
+  wet_noise_multiplier: 1.8
+  # Used only when the DNF model is unavailable.
+  base_dnf_rate: 0.09
+  seed: 42
 
 form:
-  recent_races: 5           # races looked back for rolling driver/team form
+  recent_races: 5
+  reliability_races: 12
+  trend_races: 3
 
-features:
-  use_weather: true
-  use_tyre: true
-  use_long_run: true
-  use_circuit_history: true
+data:
+  # Jolpica publishes a 4 req/s cap; stay just under it.
+  jolpica_rate_limit: 3.0
+  request_timeout_s: 20
+  max_retries: 4
+  # Use the bundled Ergast CSV dump when the network is unreachable.
+  offline_fallback: true
