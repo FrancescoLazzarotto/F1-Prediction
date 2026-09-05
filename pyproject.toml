@@ -4,28 +4,120 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "f1predict"
-version = "2.0.0"
-description = "F1 race and qualifying predictor — modular, multi-race, real-time"
+version = "3.0.0"
+description = "Two-stage Formula 1 race and qualifying predictor built on free, open data"
+readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["formula1", "f1", "motorsport", "machine-learning", "forecasting"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "fastf1>=3.8.0",
     "pandas>=2.0",
     "numpy>=1.24",
     "scikit-learn>=1.3",
+    "scipy>=1.11",
     "requests>=2.31",
-    "typer[all]>=0.12",
-    "streamlit>=1.35",
     "pyyaml>=6.0",
     "python-dotenv>=1.0",
     "joblib>=1.3",
-    "scipy>=1.11",
-    "plotly>=5.18",
-    "rich>=13.0",
     "pyarrow>=14.0",
+    "typer>=0.12",
+    "rich>=13.0",
+    "streamlit>=1.35",
+    "plotly>=5.18",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.6",
+]
+
+[project.urls]
+Repository = "https://github.com/checcolazzarotto/F1-Prediction"
 
 [project.scripts]
 f1predict = "f1predict.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+f1predict = ["py.typed"]
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+pythonpath = ["src", "app", "."]
+addopts = "-q --strict-markers --strict-config"
+filterwarnings = [
+    "error::FutureWarning:f1predict.*",
+    "ignore::DeprecationWarning",
+]
+markers = [
+    "slow: tests that train a model or hit the filesystem heavily",
+]
+
+[tool.coverage.run]
+source = ["src/f1predict"]
+omit = ["*/cli.py"]
+
+[tool.coverage.report]
+exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "raise NotImplementedError"]
+
+# ── Lint ──────────────────────────────────────────────────────────────────────
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "app", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # import sorting
+    "B",    # bugbear
+    "C4",   # comprehensions
+    "UP",   # pyupgrade
+    "SIM",  # simplify
+    "RET",  # return statements
+    "PTH",  # prefer pathlib
+    "PD",   # pandas idioms
+    "NPY",  # numpy idioms
+    "RUF",  # ruff-specific
+]
+ignore = [
+    "E501",    # line length is handled by the formatter
+    "B008",    # Typer declares defaults via function calls, by design
+    "PD010",   # we never use stack/unstack, so the check only misfires
+    "RUF001",  # typographic characters in strings are intentional
+    "RUF002",
+    "RUF003",
+    "SIM108",  # ternaries are not always clearer than an if/else
+    "PTH123",  # `open(path)` reads better than `path.open()` at a call site
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402", "SIM117"]      # fixtures import after path setup; nested `with` reads better
+"app/*" = ["E402"]                  # sys.path shim must run before the package imports
+"src/f1predict/data/repository.py" = ["PLC0415"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["f1predict"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
