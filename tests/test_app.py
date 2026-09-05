@@ -7,8 +7,12 @@ command is wired up, which is the class of breakage that unit tests miss.
 from __future__ import annotations
 
 import sys
+from contextlib import ExitStack, contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
+import pandas as pd
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -22,46 +26,123 @@ def app_path() -> str:
     return str(APP)
 
 
-class TestWebApp:
-    """The app talks to the real cache, so it needs trained models to be useful.
+def _calendar() -> pd.DataFrame:
+    """A three-round calendar straddling today, in FastF1's column shape."""
+    now = datetime.now(tz=timezone.utc)
+    dates = [now - timedelta(days=30), now + timedelta(days=7), now + timedelta(days=21)]
+    return pd.DataFrame({
+        "RoundNumber": [1, 2, 3],
+        "EventName": ["Bahrain Grand Prix", "Monaco Grand Prix", "Italian Grand Prix"],
+        "OfficialEventName": ["F1 Bahrain GP", "F1 Monaco GP", "F1 Italian GP"],
+        "Location": ["Sakhir", "Monte Carlo", "Monza"],
+        "Country": ["Bahrain", "Monaco", "Italy"],
+        "CircuitShortName": ["Sakhir", "Monaco", "Monza"],
+        "EventFormat": ["conventional"] * 3,
+        "EventDate": [pd.Timestamp(d) for d in dates],
+        "Session5": ["Race"] * 3,
+        "Session5DateUtc": [pd.Timestamp(d) for d in dates],
+    })
 
-    It must still render without raising when they are missing, which is the
-    first-run experience.
+
+def _standings() -> pd.DataFrame:
+    return pd.DataFrame({
+        "position": [1, 2],
+        "driver_id": ["verstappen", "norris"],
+        "driver_code": ["VER", "NOR"],
+        "driver_name": ["Max Verstappen", "Lando Norris"],
+        "team": ["Red Bull", "McLaren"],
+        "constructor_id": ["red_bull", "mclaren"],
+        "points": [300.0, 250.0],
+        "wins": [8, 5],
+    })
+
+
+@contextmanager
+def _isolated_app(models_ready: bool):
+    """Run the app with every external source stubbed out.
+
+    The app reaches for the FastF1 calendar and the Jolpica standings on its
+    very first render. Left unstubbed, this test would depend on two live
+    services and on whether the developer happens to have trained models
+    sitting in their cache — which is exactly how it passed locally and failed
+    in CI.
     """
+    pytest.importorskip("streamlit.testing.v1")
+    import streamlit as st
+    from streamlit.testing.v1 import AppTest
 
-    @pytest.fixture(scope="class")
-    def rendered(self):
-        pytest.importorskip("streamlit.testing.v1")
-        from streamlit.testing.v1 import AppTest
+    from f1predict.data import repository as repo
+    from f1predict.data import schedule as schedule_module
+    from f1predict.models import registry
 
-        if str(ROOT / "app") not in sys.path:
-            sys.path.insert(0, str(ROOT / "app"))
+    if str(ROOT / "app") not in sys.path:
+        sys.path.insert(0, str(ROOT / "app"))
 
-        app = AppTest.from_file(str(APP), default_timeout=180)
+    # Streamlit memoises across AppTest instances, and schedule lookups are
+    # lru_cached, so both have to be reset or the stubs never take effect.
+    st.cache_data.clear()
+    st.cache_resource.clear()
+    schedule_module.get_schedule.cache_clear()
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(schedule_module, "get_schedule", lambda year: _calendar()))
+        stack.enter_context(patch.object(repo, "driver_standings", lambda *a, **k: _standings()))
+        stack.enter_context(
+            patch.object(repo, "constructor_standings", lambda *a, **k: pd.DataFrame())
+        )
+        stack.enter_context(patch.object(repo, "season_results", lambda *a, **k: pd.DataFrame()))
+        stack.enter_context(patch.object(registry, "models_ready", lambda cfg: models_ready))
+
+        app = AppTest.from_file(str(APP), default_timeout=120)
         app.run()
-        return app
+        yield app
 
-    def test_renders_without_exceptions(self, rendered):
-        assert not rendered.exception, [str(e.value) for e in rendered.exception]
+    st.cache_data.clear()
+    st.cache_resource.clear()
+    schedule_module.get_schedule.cache_clear()
 
-    def test_sidebar_offers_season_and_event_pickers(self, rendered):
-        labels = [widget.label for widget in rendered.sidebar.selectbox]
-        assert any("Season" in label or "Stagione" in label for label in labels)
 
-    def test_has_a_predict_and_a_train_button(self, rendered):
-        labels = [button.label for button in rendered.sidebar.button]
-        assert len(labels) >= 2
+class TestWebAppFirstRun:
+    """Before anything is trained, the app must explain itself rather than break."""
 
-    def test_shows_every_tab(self, rendered):
+    def test_renders_without_exceptions(self):
+        with _isolated_app(models_ready=False) as app:
+            assert not app.exception, [str(e.value) for e in app.exception]
+
+    def test_prompts_for_training_instead_of_showing_tabs(self):
+        with _isolated_app(models_ready=False) as app:
+            assert len(app.tabs) == 0
+            assert app.warning, "the first run should say that no model exists yet"
+
+
+class TestWebApp:
+    """With models available, every tab must render."""
+
+    def test_renders_without_exceptions(self):
+        with _isolated_app(models_ready=True) as app:
+            assert not app.exception, [str(e.value) for e in app.exception]
+
+    def test_sidebar_offers_season_and_event_pickers(self):
+        with _isolated_app(models_ready=True) as app:
+            labels = [widget.label for widget in app.sidebar.selectbox]
+            assert any("Season" in label for label in labels)
+            assert any("Grand Prix" in label for label in labels)
+
+    def test_has_a_predict_and_a_train_button(self):
+        with _isolated_app(models_ready=True) as app:
+            assert len(app.sidebar.button) >= 2
+
+    def test_shows_every_tab(self):
         # Race, Qualifying, Championship, Accuracy, Calendar, Model.
-        assert len(rendered.tabs) == 6
+        with _isolated_app(models_ready=True) as app:
+            assert len(app.tabs) == 6
 
-    def test_language_toggle_switches_strings(self, rendered):
-        pytest.importorskip("streamlit.testing.v1")
-        rendered.sidebar.radio[0].set_value("it").run()
-        assert not rendered.exception
-        labels = [widget.label for widget in rendered.sidebar.selectbox]
-        assert any("Stagione" in label for label in labels)
+    def test_language_toggle_switches_strings(self):
+        with _isolated_app(models_ready=True) as app:
+            app.sidebar.radio[0].set_value("it").run()
+            assert not app.exception, [str(e.value) for e in app.exception]
+            labels = [widget.label for widget in app.sidebar.selectbox]
+            assert any("Stagione" in label for label in labels)
 
 
 class TestCliSurface:
