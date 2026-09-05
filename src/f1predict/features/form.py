@@ -1,4 +1,11 @@
-"""Compute driver and team form features from historical season results."""
+"""Rolling driver and team form, computed for the whole history in one pass.
+
+The central guarantee here is **no leakage**: every window is shifted so that a
+driver's features for round 12 are built strictly from rounds 1-11. Training and
+prediction share the same code path — an upcoming race is appended to the
+history as a placeholder row and then read back out — so features cannot drift
+between the two.
+"""
 
 from __future__ import annotations
 
@@ -7,162 +14,262 @@ import logging
 import numpy as np
 import pandas as pd
 
+from f1predict.config import FormConfig
+
 log = logging.getLogger(__name__)
 
-_DNF_STATUSES = {
-    "Retired", "Accident", "Engine", "Gearbox", "Mechanical",
-    "Collision", "Hydraulics", "Power Unit", "Brakes", "Electrical",
-    "Suspension", "ERS", "Collision damage", "Damage", "Overheating",
-    "Did not finish", "Excluded",
+FORM_COLUMNS = [
+    "year", "round", "driver_id", "constructor_id",
+    "form_avg_pos", "form_avg_pts", "form_pos_gain", "form_trend",
+    "form_dnf_rate", "form_avg_quali_pos",
+    "circuit_avg_pos", "circuit_n_starts",
+    "team_avg_pos", "team_avg_pts", "team_dnf_rate", "team_avg_quali_pos",
+]
+
+#: Values used for a driver with no prior races at all (a rookie, or round 1 of
+#: the earliest season we hold). Deliberately mid-field rather than zero.
+FORM_DEFAULTS: dict[str, float] = {
+    "form_avg_pos": 10.0,
+    "form_avg_pts": 4.0,
+    "form_pos_gain": 0.0,
+    "form_trend": 0.0,
+    "form_dnf_rate": 0.09,
+    "form_avg_quali_pos": 10.0,
+    "circuit_avg_pos": 10.0,
+    "circuit_n_starts": 0.0,
+    "team_avg_pos": 10.0,
+    "team_avg_pts": 4.0,
+    "team_dnf_rate": 0.09,
+    "team_avg_quali_pos": 10.0,
 }
 
+_REQUIRED_COLUMNS = ("year", "round", "driver_id", "race_pos")
 
-def compute_form_features(
-    season_results: pd.DataFrame,
-    driver_id: str,
-    year: int,
-    before_round: int,
-    circuit_id: str,
-    n_races: int = 5,
-) -> dict:
-    """
-    Compute form features for a single driver before a given round.
+
+def build_form_table(
+    results: pd.DataFrame,
+    quali: pd.DataFrame | None = None,
+    form_cfg: FormConfig | None = None,
+) -> pd.DataFrame:
+    """Form features for every (driver, race) in ``results``.
 
     Args:
-        season_results: Combined results DataFrame from one or more seasons.
-                        Required columns: year, round, circuit_id, driver_id,
-                        race_pos, points, status.
-        driver_id: Jolpica driverId string.
-        year: Target race year.
-        before_round: Target race round (excluded from form window).
-        circuit_id: Circuit identifier (for circuit-specific history).
-        n_races: Rolling window size.
+        results: Multi-season race results. Needs at least ``year``, ``round``,
+            ``driver_id`` and ``race_pos``; ``constructor_id``, ``grid_pos``,
+            ``points``, ``circuit_id`` and ``dnf`` enrich the output when present.
+        quali: Optional qualifying history, used for the qualifying-form columns.
+        form_cfg: Window sizes. Defaults to :class:`FormConfig`.
 
-    Returns a dict with form feature values.
+    Returns:
+        One row per (year, round, driver_id) whose values describe the driver's
+        state *entering* that race.
     """
-    # Filter to this driver's results prior to the target race
-    driver_df = season_results[
-        (season_results["driver_id"] == driver_id) &
-        ~(
-            (season_results["year"] == year) &
-            (season_results["round"] >= before_round)
-        )
-    ].sort_values(["year", "round"], ascending=True)
+    cfg = form_cfg or FormConfig()
 
-    if driver_df.empty:
-        return _default_form()
+    if results is None or results.empty:
+        return pd.DataFrame({c: pd.Series(dtype="float64") for c in FORM_COLUMNS})
+    missing = [c for c in _REQUIRED_COLUMNS if c not in results.columns]
+    if missing:
+        raise ValueError(f"Results frame is missing required column(s): {missing}")
 
-    recent = driver_df.tail(n_races)
-    dnf_mask = recent["status"].isin(_DNF_STATUSES)
+    df = _normalise(results)
+    df = _attach_quali(df, quali)
 
-    form: dict = {
-        "form_avg_pos": float(recent["race_pos"].mean()),
-        "form_avg_pts": float(recent["points"].mean()),
-        "form_dnf_rate": float(dnf_mask.mean()),
-        "form_n_races": int(len(recent)),
-    }
+    df = _driver_form(df, cfg)
+    df = _circuit_history(df)
+    df = _team_form(df, cfg)
 
-    # ── Circuit-specific history ─────────────────────────────────────────────
-    circuit_df = driver_df[driver_df["circuit_id"] == circuit_id]
-    if not circuit_df.empty:
-        form["circuit_avg_pos"] = float(circuit_df["race_pos"].mean())
-        form["circuit_n_starts"] = int(len(circuit_df))
+    # Fall back to sensible mid-field values only where a window was genuinely
+    # empty, which is exactly the rookie / first-race case.
+    for column, default in FORM_DEFAULTS.items():
+        if column in df.columns:
+            df[column] = df[column].fillna(default)
+
+    return df.reindex(columns=FORM_COLUMNS).reset_index(drop=True)
+
+
+def _normalise(results: pd.DataFrame) -> pd.DataFrame:
+    """Sort chronologically and derive the columns the windows need."""
+    df = results.copy()
+    df["year"] = pd.to_numeric(df["year"], errors="coerce").astype("Int64")
+    df["round"] = pd.to_numeric(df["round"], errors="coerce").astype("Int64")
+    df["race_pos"] = pd.to_numeric(df["race_pos"], errors="coerce")
+    df["points"] = pd.to_numeric(df.get("points"), errors="coerce")
+
+    if "grid_pos" in df.columns:
+        grid = pd.to_numeric(df["grid_pos"], errors="coerce")
+        # A grid slot of 0 means a pit-lane start, which is not a real position.
+        df["pos_gain"] = grid.where(grid > 0) - df["race_pos"]
     else:
-        form["circuit_avg_pos"] = form["form_avg_pos"]
-        form["circuit_n_starts"] = 0
+        df["pos_gain"] = np.nan
 
-    return form
+    if "dnf" in df.columns:
+        df["dnf_flag"] = df["dnf"].astype("boolean").fillna(False).astype(float)
+    elif "status" in df.columns:
+        from f1predict.constants import is_dnf
+
+        df["dnf_flag"] = df["status"].map(is_dnf).astype(float)
+    else:
+        df["dnf_flag"] = np.nan
+
+    if "constructor_id" not in df.columns:
+        df["constructor_id"] = ""
+    df["constructor_id"] = df["constructor_id"].fillna("").astype(str)
+    df["driver_id"] = df["driver_id"].fillna("").astype(str)
+
+    return df.sort_values(["year", "round"], kind="stable").reset_index(drop=True)
 
 
-def compute_team_form(
-    season_results: pd.DataFrame,
-    constructor_id: str,
-    year: int,
-    before_round: int,
-    n_races: int = 5,
-) -> dict:
-    """Return average team race position over the last n_races races."""
-    team_df = season_results[
-        (season_results["constructor_id"] == constructor_id) &
-        ~(
-            (season_results["year"] == year) &
-            (season_results["round"] >= before_round)
+def _attach_quali(df: pd.DataFrame, quali: pd.DataFrame | None) -> pd.DataFrame:
+    """Join each driver's qualifying position onto their race row."""
+    if quali is None or quali.empty or "quali_pos" not in quali.columns:
+        df["quali_pos"] = np.nan
+        return df
+
+    q = quali[["year", "round", "driver_id", "quali_pos"]].copy()
+    q["year"] = pd.to_numeric(q["year"], errors="coerce").astype("Int64")
+    q["round"] = pd.to_numeric(q["round"], errors="coerce").astype("Int64")
+    q["quali_pos"] = pd.to_numeric(q["quali_pos"], errors="coerce")
+    q["driver_id"] = q["driver_id"].fillna("").astype(str)
+    q = q.drop_duplicates(["year", "round", "driver_id"])
+
+    merged = df.merge(q, on=["year", "round", "driver_id"], how="left")
+    return merged.sort_values(["year", "round"], kind="stable").reset_index(drop=True)
+
+
+def _driver_form(df: pd.DataFrame, cfg: FormConfig) -> pd.DataFrame:
+    """Rolling windows over a driver's own previous races."""
+    by_driver = df.groupby("driver_id", sort=False)
+
+    df["form_avg_pos"] = _rolling_mean(by_driver["race_pos"], cfg.recent_races)
+    df["form_avg_pts"] = _rolling_mean(by_driver["points"], cfg.recent_races)
+    df["form_pos_gain"] = _rolling_mean(by_driver["pos_gain"], cfg.recent_races)
+    df["form_dnf_rate"] = _rolling_mean(by_driver["dnf_flag"], cfg.reliability_races)
+    df["form_avg_quali_pos"] = _rolling_mean(by_driver["quali_pos"], cfg.recent_races)
+
+    # Trend: recent short window versus the longer one. Negative means the
+    # driver has been finishing higher up lately than their season average.
+    short = _rolling_mean(by_driver["race_pos"], cfg.trend_races)
+    df["form_trend"] = short - df["form_avg_pos"]
+    return df
+
+
+def _circuit_history(df: pd.DataFrame) -> pd.DataFrame:
+    """Expanding record of how a driver has gone at this circuit before."""
+    if "circuit_id" not in df.columns:
+        df["circuit_avg_pos"] = np.nan
+        df["circuit_n_starts"] = 0.0
+        return df
+
+    by_circuit = df.groupby(["driver_id", "circuit_id"], sort=False)
+    df["circuit_avg_pos"] = by_circuit["race_pos"].transform(
+        lambda s: s.shift(1).expanding().mean()
+    )
+    df["circuit_n_starts"] = by_circuit["race_pos"].transform(
+        lambda s: s.shift(1).expanding().count()
+    ).astype(float)
+    return df
+
+
+def _team_form(df: pd.DataFrame, cfg: FormConfig) -> pd.DataFrame:
+    """Rolling team form, aggregated per race weekend before the window is taken.
+
+    Shifting driver-level rows by one would leak: a constructor's two cars are
+    adjacent rows in the same race, so the second driver's window would include
+    their teammate's result *from the race being predicted*. Collapsing each
+    constructor to one row per weekend first makes the shift skip the whole
+    race, for both cars alike.
+    """
+    if "constructor_id" not in df.columns:
+        for column in ("team_avg_pos", "team_avg_pts", "team_dnf_rate",
+                       "team_avg_quali_pos"):
+            df[column] = np.nan
+        return df
+
+    per_race = (
+        df.groupby(["constructor_id", "year", "round"], as_index=False)
+        .agg(
+            _pos=("race_pos", "mean"),
+            _pts=("points", "mean"),
+            _dnf=("dnf_flag", "mean"),
+            _quali=("quali_pos", "mean"),
         )
-    ].sort_values(["year", "round"])
+        .sort_values(["year", "round"], kind="stable")
+        .reset_index(drop=True)
+    )
 
-    if team_df.empty:
-        return {"team_avg_pos": 10.0, "team_avg_pts": 5.0}
+    by_team = per_race.groupby("constructor_id", sort=False)
+    per_race["team_avg_pos"] = _rolling_mean(by_team["_pos"], cfg.recent_races)
+    per_race["team_avg_pts"] = _rolling_mean(by_team["_pts"], cfg.recent_races)
+    per_race["team_dnf_rate"] = _rolling_mean(by_team["_dnf"], cfg.reliability_races)
+    per_race["team_avg_quali_pos"] = _rolling_mean(by_team["_quali"], cfg.recent_races)
 
-    recent = team_df.tail(n_races * 2)  # 2 drivers × n_races
-    return {
-        "team_avg_pos": float(recent["race_pos"].mean()),
-        "team_avg_pts": float(recent["points"].mean()),
-    }
+    columns = ["constructor_id", "year", "round", "team_avg_pos", "team_avg_pts",
+               "team_dnf_rate", "team_avg_quali_pos"]
+    return df.merge(per_race[columns], on=["constructor_id", "year", "round"], how="left")
 
 
-def build_form_matrix(
-    season_results: pd.DataFrame,
-    drivers: pd.DataFrame,
+def _rolling_mean(grouped, window: int) -> pd.Series:
+    """Mean of the previous ``window`` rows within each group.
+
+    The ``shift(1)`` is what keeps a row out of its own feature window.
+    """
+    return grouped.transform(
+        lambda s: s.shift(1).rolling(window, min_periods=1).mean()
+    )
+
+
+def form_for_event(
+    results: pd.DataFrame,
+    entries: pd.DataFrame,
     year: int,
     round_num: int,
-    circuit_id: str,
-    n_races: int = 5,
+    circuit_id: str = "",
+    quali: pd.DataFrame | None = None,
+    form_cfg: FormConfig | None = None,
 ) -> pd.DataFrame:
+    """Form features for the drivers entered in one (possibly future) race.
+
+    The event is appended to the history as a placeholder with no result, then
+    the full table is rebuilt and that event's rows read back. This is slightly
+    more work than a bespoke query, but it guarantees prediction-time features
+    are computed by exactly the same code as training-time ones.
     """
-    Build the form feature DataFrame for all drivers in an entry list.
+    cfg = form_cfg or FormConfig()
 
-    Args:
-        season_results: Multi-season results (columns: year, round, circuit_id,
-                        driver_id, constructor_id, race_pos, points, status).
-        drivers: Entry list DataFrame with columns: driver_code, driver_id, team.
-        year, round_num, circuit_id: Target race identifiers.
-        n_races: Rolling window.
+    if entries is None or entries.empty:
+        return pd.DataFrame({c: pd.Series(dtype="float64") for c in FORM_COLUMNS})
 
-    Returns a DataFrame with one row per driver and form feature columns.
-    """
-    if drivers.empty or season_results.empty:
-        return pd.DataFrame()
+    history = results.copy() if results is not None else pd.DataFrame()
 
-    # Build constructor_id lookup from season_results for matching drivers
-    cid_map: dict[str, str] = {}
-    if "constructor_id" in season_results.columns:
-        latest = season_results[season_results["driver_id"].isin(drivers["driver_id"].tolist())]
-        if not latest.empty:
-            cid_map = (
-                latest.sort_values(["year", "round"])
-                .groupby("driver_id")["constructor_id"]
-                .last()
-                .to_dict()
-            )
+    # Drop any existing rows for the target race: we want form *entering* it,
+    # and a backtest must not see the result it is being scored against.
+    if not history.empty and {"year", "round"} <= set(history.columns):
+        history = history[~((history["year"] == year) & (history["round"] == round_num))]
 
-    rows = []
-    for _, driver_row in drivers.iterrows():
-        did = driver_row.get("driver_id", "")
-        form = compute_form_features(
-            season_results, did, year, round_num, circuit_id, n_races
-        )
-        constructor_id = cid_map.get(did, "")
-        if constructor_id:
-            team_form = compute_team_form(season_results, constructor_id, year, round_num, n_races)
-        else:
-            team_form = {"team_avg_pos": 10.0, "team_avg_pts": 5.0}
+    placeholder = pd.DataFrame({
+        "year": year,
+        "round": round_num,
+        "circuit_id": circuit_id,
+        "driver_id": entries["driver_id"].astype(str).to_numpy(),
+        "constructor_id": entries.get(
+            "constructor_id", pd.Series([""] * len(entries))
+        ).astype(str).to_numpy(),
+        "race_pos": np.nan,
+        "grid_pos": np.nan,
+        "points": np.nan,
+        "dnf": pd.NA,
+        "status": "",
+    })
 
-        rows.append({
-            "driver_code": driver_row.get("driver_code", ""),
-            "driver_id": did,
-            **form,
-            **team_form,
-        })
+    combined = (
+        pd.concat([history, placeholder], ignore_index=True)
+        if not history.empty else placeholder
+    )
 
-    return pd.DataFrame(rows)
+    if quali is not None and not quali.empty:
+        quali = quali[~((quali["year"] == year) & (quali["round"] == round_num))]
 
-
-def _default_form() -> dict:
-    return {
-        "form_avg_pos": 10.0,
-        "form_avg_pts": 5.0,
-        "form_dnf_rate": 0.1,
-        "form_n_races": 0,
-        "circuit_avg_pos": 10.0,
-        "circuit_n_starts": 0,
-    }
+    table = build_form_table(combined, quali=quali, form_cfg=cfg)
+    event = table[(table["year"] == year) & (table["round"] == round_num)]
+    return event.reset_index(drop=True)

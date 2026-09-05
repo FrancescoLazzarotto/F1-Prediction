@@ -1,4 +1,10 @@
-"""Extract per-driver features from Free Practice sessions."""
+"""Per-driver features extracted from a Free Practice session.
+
+Practice timing is noisy: in-laps, out-laps, cool-down laps, traffic, red flags
+and four different tyre compounds all land in the same table. The job here is to
+separate the two signals that matter — one-lap pace and race pace — and express
+both as a percentage gap to the session best so they compare across circuits.
+"""
 
 from __future__ import annotations
 
@@ -7,101 +13,179 @@ import logging
 import numpy as np
 import pandas as pd
 
+from f1predict.constants import COMPOUND_OFFSET_S
+
 log = logging.getLogger(__name__)
 
-_MIN_LONG_RUN_LAPS = 5   # minimum consecutive laps to consider a stint a "long run"
+#: Laps slower than this multiple of a stint's best are cool-down or traffic
+#: laps, not representative running.
+_STINT_OUTLIER_RATIO = 1.07
+
+#: Ratio applied to a driver's best lap when no usable long run exists.
+_LONG_RUN_FALLBACK_RATIO = 1.025
+
+PRACTICE_COLUMNS = [
+    "driver_code", "fp_best_lap_s", "fp_best_gap_pct", "fp_pace_s",
+    "fp_pace_gap_pct", "fp_rank_pct", "fp_theory_lap_s", "fp_theory_gap_pct",
+    "fp_n_laps", "fp_n_long_run_laps", "fp_compound",
+]
 
 
-def extract_fp_features(laps: pd.DataFrame, min_laps: int = _MIN_LONG_RUN_LAPS) -> pd.DataFrame:
+def extract_practice_features(laps: pd.DataFrame, min_laps: int = 5) -> pd.DataFrame:
+    """Reduce a FastF1 laps table to one row per driver.
+
+    Args:
+        laps: A FastF1 ``Laps`` frame from any practice session.
+        min_laps: Minimum clean laps in a stint for it to count as a long run.
+
+    Returns:
+        One row per driver with the columns in :data:`PRACTICE_COLUMNS`, or an
+        empty frame when the input has no usable timing.
     """
-    Given a FastF1 Laps DataFrame (from FP1/FP2/FP3), return a per-driver
-    feature DataFrame with columns:
-        driver_code, fp_best_lap_s, fp_gap_to_best_s, fp_long_run_pace_s,
-        fp_s1_best_s, fp_s2_best_s, fp_s3_best_s.
+    if laps is None or len(laps) == 0 or "Driver" not in laps.columns:
+        return _empty()
 
-    Returns an empty DataFrame if input is empty or malformed.
-    """
-    if laps is None or len(laps) == 0:
-        return pd.DataFrame()
-
-    laps = laps.copy()
-
-    # Convert timedelta columns to seconds
+    df = laps.copy()
     for col in ("LapTime", "Sector1Time", "Sector2Time", "Sector3Time"):
-        if col in laps.columns:
-            laps[f"_{col}_s"] = laps[col].dt.total_seconds()
+        df[f"{col}_s"] = (
+            df[col].dt.total_seconds() if col in df.columns else np.nan
+        )
 
-    if "_LapTime_s" not in laps.columns:
-        return pd.DataFrame()
+    if df["LapTime_s"].notna().sum() == 0:
+        return _empty()
 
-    # ── Best lap per driver ──────────────────────────────────────────────────
-    best_laps = (
-        laps.groupby("Driver")["_LapTime_s"]
-        .min()
-        .rename("fp_best_lap_s")
-        .reset_index()
+    valid = _valid_laps(df)
+    if valid.empty:
+        # Every lap was filtered out (a wet or red-flagged session); fall back
+        # to raw timed laps rather than returning nothing at all.
+        valid = df[df["LapTime_s"].notna()]
+    if valid.empty:
+        return _empty()
+
+    best = _best_laps(valid)
+    pace = _long_run_pace(valid, min_laps)
+    theory = _theoretical_best(valid)
+    counts = (
+        valid.groupby("Driver")["LapTime_s"].count().rename("fp_n_laps").reset_index()
         .rename(columns={"Driver": "driver_code"})
     )
-    fastest = best_laps["fp_best_lap_s"].min()
-    best_laps["fp_gap_to_best_s"] = best_laps["fp_best_lap_s"] - fastest
 
-    # ── Long-run pace ────────────────────────────────────────────────────────
-    # Filter to clean laps: not pit-in/pit-out, IsAccurate where available
-    clean = laps.copy()
-    if "PitOutLap" in clean.columns:
-        clean = clean[~clean["PitOutLap"].fillna(False)]
-    if "PitInLap" in clean.columns:
-        clean = clean[~clean["PitInLap"].fillna(False)]
-    if "IsAccurate" in clean.columns:
-        clean = clean[clean["IsAccurate"].fillna(True)]
-    # Only clear-track laps where possible
-    if "TrackStatus" in clean.columns:
-        clean = clean[clean["TrackStatus"].astype(str) == "1"]
+    out = (
+        best.merge(pace, on="driver_code", how="left")
+        .merge(theory, on="driver_code", how="left")
+        .merge(counts, on="driver_code", how="left")
+    )
 
-    long_run_rows = []
-    if "Stint" in clean.columns:
-        for (driver, stint), group in clean.groupby(["Driver", "Stint"]):
-            if len(group) >= min_laps:
-                median_s = group["_LapTime_s"].median()
-                long_run_rows.append({"driver_code": driver, "fp_long_run_pace_s": median_s})
+    # A driver with no clean long run still has one-lap pace to fall back on.
+    missing = out["fp_pace_s"].isna()
+    out.loc[missing, "fp_pace_s"] = out.loc[missing, "fp_best_lap_s"] * _LONG_RUN_FALLBACK_RATIO
+    out["fp_n_long_run_laps"] = out["fp_n_long_run_laps"].fillna(0).astype(int)
+    out["fp_n_laps"] = out["fp_n_laps"].fillna(0).astype(int)
 
-    if long_run_rows:
-        long_run_df = pd.DataFrame(long_run_rows)
-        long_run_df = (
-            long_run_df.groupby("driver_code")["fp_long_run_pace_s"]
-            .min()
-            .reset_index()
-        )
-    else:
-        # Fallback: use best 5-lap average × 1.02 as proxy
-        fallback = (
-            clean.groupby("Driver")["_LapTime_s"]
-            .apply(lambda x: x.nsmallest(5).mean() * 1.02 if len(x) >= 5 else x.mean() * 1.02)
-            .rename("fp_long_run_pace_s")
-            .reset_index()
-            .rename(columns={"Driver": "driver_code"})
-        )
-        long_run_df = fallback
+    out["fp_best_gap_pct"] = _gap_pct(out["fp_best_lap_s"])
+    out["fp_pace_gap_pct"] = _gap_pct(out["fp_pace_s"])
+    out["fp_theory_gap_pct"] = _gap_pct(out["fp_theory_lap_s"])
+    # Rank as a share of the field, so it means the same in a 20- and 22-car grid.
+    out["fp_rank_pct"] = out["fp_best_lap_s"].rank(method="min") / max(len(out), 1)
 
-    # ── Best sector times per driver ─────────────────────────────────────────
-    sector_agg: dict[str, pd.Series] = {}
-    for i, col in enumerate(("_Sector1Time_s", "_Sector2Time_s", "_Sector3Time_s"), start=1):
-        if col in laps.columns:
-            sector_agg[f"fp_s{i}_best_s"] = laps.groupby("Driver")[col].min()
+    return out.reindex(columns=PRACTICE_COLUMNS).reset_index(drop=True)
 
-    if sector_agg:
-        sector_df = pd.DataFrame(sector_agg).reset_index().rename(columns={"Driver": "driver_code"})
-    else:
-        sector_df = pd.DataFrame(columns=["driver_code"])
 
-    # ── Merge all ────────────────────────────────────────────────────────────
-    result = best_laps.merge(long_run_df, on="driver_code", how="left")
-    if not sector_df.empty and len(sector_df.columns) > 1:
-        result = result.merge(sector_df, on="driver_code", how="left")
+def _valid_laps(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep only timed, accurate, green-flag laps that are not in/out laps."""
+    mask = df["LapTime_s"].notna() & (df["LapTime_s"] > 0)
 
-    # Fill any remaining NaN long-run paces with best lap × 1.02
-    if "fp_long_run_pace_s" in result.columns:
-        mask = result["fp_long_run_pace_s"].isna()
-        result.loc[mask, "fp_long_run_pace_s"] = result.loc[mask, "fp_best_lap_s"] * 1.02
+    if "PitOutTime" in df.columns:
+        mask &= df["PitOutTime"].isna()
+    if "PitInTime" in df.columns:
+        mask &= df["PitInTime"].isna()
+    if "IsAccurate" in df.columns:
+        mask &= df["IsAccurate"].fillna(True).astype(bool)
+    if "Deleted" in df.columns:
+        # Object dtype with None entries, so coerce before the boolean cast.
+        mask &= ~df["Deleted"].astype("boolean").fillna(False).astype(bool)
+    if "TrackStatus" in df.columns:
+        # "1" is all-clear; anything else is yellow, SC, VSC or red.
+        mask &= df["TrackStatus"].astype(str).str.strip() == "1"
 
-    return result
+    return df[mask]
+
+
+def _best_laps(valid: pd.DataFrame) -> pd.DataFrame:
+    return (
+        valid.groupby("Driver")["LapTime_s"].min()
+        .rename("fp_best_lap_s").reset_index()
+        .rename(columns={"Driver": "driver_code"})
+    )
+
+
+def _long_run_pace(valid: pd.DataFrame, min_laps: int) -> pd.DataFrame:
+    """Best representative race-pace stint per driver, normalised for compound.
+
+    A stint qualifies when it has ``min_laps`` clean laps left after dropping
+    cool-down laps. Its pace is the median of those laps, shifted onto a common
+    compound baseline so a hard-tyre run is not read as a slow car.
+    """
+    if "Stint" not in valid.columns:
+        return pd.DataFrame(columns=["driver_code", "fp_pace_s",
+                                     "fp_n_long_run_laps", "fp_compound"])
+
+    records: list[dict] = []
+    for (driver, _stint), group in valid.groupby(["Driver", "Stint"], dropna=True):
+        times = group["LapTime_s"]
+        if len(times) < min_laps:
+            continue
+
+        # Drop laps well off the stint's best: those are traffic or cool-downs.
+        representative = times[times <= times.min() * _STINT_OUTLIER_RATIO]
+        if len(representative) < min_laps:
+            continue
+
+        compound = str(group["Compound"].iloc[0]) if "Compound" in group.columns else "UNKNOWN"
+        offset = COMPOUND_OFFSET_S.get(compound.upper(), COMPOUND_OFFSET_S["UNKNOWN"])
+        records.append({
+            "driver_code": driver,
+            "fp_pace_s": float(representative.median()) - offset,
+            "fp_n_long_run_laps": len(representative),
+            "fp_compound": compound,
+        })
+
+    if not records:
+        return pd.DataFrame(columns=["driver_code", "fp_pace_s",
+                                     "fp_n_long_run_laps", "fp_compound"])
+
+    stints = pd.DataFrame(records)
+    best_idx = stints.groupby("driver_code")["fp_pace_s"].idxmin()
+    return stints.loc[best_idx].reset_index(drop=True)
+
+
+def _theoretical_best(valid: pd.DataFrame) -> pd.DataFrame:
+    """Sum of each driver's best three sectors — their perfect lap.
+
+    Rewards a driver who was fast in every sector but never strung them
+    together, which is a better read on car pace than a single clean lap.
+    """
+    sector_cols = [f"Sector{i}Time_s" for i in (1, 2, 3)]
+    if not all(col in valid.columns for col in sector_cols):
+        return pd.DataFrame(columns=["driver_code", "fp_theory_lap_s"])
+
+    bests = valid.groupby("Driver")[sector_cols].min()
+    if bests.empty:
+        return pd.DataFrame(columns=["driver_code", "fp_theory_lap_s"])
+
+    theory = bests.sum(axis=1, min_count=3).rename("fp_theory_lap_s")
+    return theory.reset_index().rename(columns={"Driver": "driver_code"})
+
+
+def _gap_pct(series: pd.Series) -> pd.Series:
+    """Percentage gap to the fastest value in the column."""
+    if series is None or series.empty:
+        return pd.Series(dtype="float64")
+    reference = series.min(skipna=True)
+    if pd.isna(reference) or reference <= 0:
+        return pd.Series(np.nan, index=series.index)
+    return (series / reference - 1.0) * 100.0
+
+
+def _empty() -> pd.DataFrame:
+    return pd.DataFrame({c: pd.Series(dtype="float64") for c in PRACTICE_COLUMNS})
