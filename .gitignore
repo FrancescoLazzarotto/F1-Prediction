@@ -1,11 +1,25 @@
+# Secrets
 .env
 .env.*
+
+# Caches (models, session data, features — all regenerable)
 .cache/
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-src/f1predict.egg-info/
+.coverage
+htmlcov/
+
+# Build artefacts
+build/
+dist/
+*.egg-info/
+src/*.egg-info/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
