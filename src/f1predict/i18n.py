@@ -44,6 +44,25 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "expected_points": "Exp. pts",
         "quali_pos": "Predicted quali",
         "gap": "Gap",
+        # Qualifying simulator
+        "quali_sim": "Driver qualifying simulator",
+        "quali_sim_hint": (
+            "Pick a driver to see how likely every grid slot is, given this "
+            "weekend's practice pace."
+        ),
+        "run_quali_sim": "Simulate qualifying",
+        "slot_odds": "Chance of each grid slot",
+        "this_or_better": "This or better",
+        "most_likely": "Most likely slot",
+        "confidence_range": "80% range",
+        "expected_quali": "Expected slot",
+        "p_pole": "Pole",
+        "p_front_row": "Front row",
+        "p_q3": "Into Q3",
+        "quali_from_form": (
+            "No practice timing for this event yet, so this comes from form alone."
+        ),
+        "no_quali_sim": "Run the simulation to see a driver's grid-slot odds.",
         # Race context
         "circuit": "Circuit",
         "race_date": "Race date",
@@ -122,6 +141,28 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "expected_points": "Punti att.",
         "quali_pos": "Qualifica prevista",
         "gap": "Distacco",
+        # Qualifying simulator
+        "quali_sim": "Simulatore qualifiche per pilota",
+        "quali_sim_hint": (
+            "Scegli un pilota per vedere quanto è probabile ogni casella della "
+            "griglia, viste le prove libere di questo weekend."
+        ),
+        "run_quali_sim": "Simula le qualifiche",
+        "slot_odds": "Probabilità di ogni casella",
+        "this_or_better": "Questa o meglio",
+        "most_likely": "Posizione più probabile",
+        "confidence_range": "Intervallo all'80%",
+        "expected_quali": "Posizione attesa",
+        "p_pole": "Pole",
+        "p_front_row": "Prima fila",
+        "p_q3": "In Q3",
+        "quali_from_form": (
+            "Nessun dato delle libere per questo evento: la previsione viene "
+            "solo dalla forma recente."
+        ),
+        "no_quali_sim": (
+            "Avvia la simulazione per vedere le probabilità di griglia di un pilota."
+        ),
         # Race context
         "circuit": "Circuito",
         "race_date": "Data gara",

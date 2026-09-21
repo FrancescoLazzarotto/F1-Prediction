@@ -314,33 +314,143 @@ def race_tab(prediction, _) -> None:
     )
 
 
-def quali_tab(prediction, _) -> None:
-    if prediction.quali_table is None or prediction.quali_table.empty:
-        if prediction.grid_source == "actual_quali":
-            st.info(
-                "Qualifying has already run for this event, so the real grid was "
-                "used instead of a prediction."
+def quali_tab(prediction, selection: dict, _) -> None:
+    """The predicted order for the current forecast, then the driver simulator."""
+    if prediction is None:
+        st.info(_("select_prompt"), icon="👈")
+    elif prediction.quali_table is not None and not prediction.quali_table.empty:
+        st.markdown(f"#### {_('tab_quali')}")
+        ui.note(
+            f"Predicted from {prediction.practice_session or 'practice'} pace: best "
+            "lap, long-run stints, theoretical best lap and the gap to each driver's "
+            "teammate."
+        )
+        ui.quali_table(prediction.quali_table, _labels(_))
+    elif prediction.grid_source == "actual_quali":
+        st.info(
+            "Qualifying has already run for this event, so the real grid was "
+            "used instead of a prediction."
+        )
+        actual = repo.quali_results(
+            prediction.event["year"], prediction.event["round"], get_config()
+        )
+        if not actual.empty:
+            st.markdown("#### Actual qualifying result")
+            st.dataframe(
+                actual[["quali_pos", "driver_name", "team", "best_quali_s",
+                        "quali_gap_to_pole_s"]],
+                hide_index=True, width="stretch",
             )
-            actual = repo.quali_results(
-                prediction.event["year"], prediction.event["round"], get_config()
-            )
-            if not actual.empty:
-                st.markdown("#### Actual qualifying result")
-                st.dataframe(
-                    actual[["quali_pos", "driver_name", "team", "best_quali_s",
-                            "quali_gap_to_pole_s"]],
-                    hide_index=True, width="stretch",
-                )
-        else:
-            st.warning(_("no_practice"))
-        return
+    else:
+        st.warning(_("no_practice"))
 
-    st.markdown(f"#### {_('tab_quali')}")
-    ui.note(
-        f"Predicted from {prediction.practice_session or 'practice'} pace: best lap, "
-        "long-run stints, theoretical best lap and the gap to each driver's teammate."
+    st.divider()
+    quali_simulator(selection, _)
+
+
+def quali_simulator(selection: dict, _) -> None:
+    """Per-driver grid-slot odds, simulated from this weekend's practice pace.
+
+    Runs on its own button rather than off the race prediction, so it is
+    available for a weekend whose qualifying has already happened — comparing
+    the simulated distribution against the real result is half the point.
+    """
+    st.markdown(f"#### {_('quali_sim')}")
+    ui.note(_("quali_sim_hint"))
+
+    key = (
+        f"quali_sim:{selection['year']}:{selection['round']}"
+        f":{selection['simulations']}"
     )
-    ui.quali_table(prediction.quali_table, _labels(_))
+    if st.button(f"⏱️ {_('run_quali_sim')}", type="primary", key="run_quali_sim"):
+        cfg = get_config()
+        pipeline = get_pipeline()
+        pipeline.cfg = replace(
+            cfg, simulation=replace(cfg.simulation, n_simulations=selection["simulations"])
+        )
+        status_box = st.status(_("loading"), expanded=True)
+        try:
+            st.session_state[key] = pipeline.simulate_quali(
+                selection["year"], selection["round"],
+                progress=lambda m: status_box.write(m),
+            )
+            status_box.update(label=_("done"), state="complete", expanded=False)
+        except Exception as exc:
+            status_box.update(label="Simulation failed", state="error")
+            st.error(str(exc))
+            return
+
+    quali = st.session_state.get(key)
+    if quali is None:
+        st.info(_("no_quali_sim"), icon="⏱️")
+        return
+    if quali.is_empty:
+        st.warning(_("no_practice"))
+        return
+    if not quali.from_practice:
+        st.warning(_("quali_from_form"), icon="⚠️")
+
+    names = dict(zip(
+        quali.table["driver_code"], quali.table["driver_name"], strict=False
+    ))
+    chosen = st.selectbox(
+        _("driver"), quali.driver_codes,
+        format_func=lambda code: names.get(code, code), key="quali_sim_driver",
+    )
+
+    summary = quali.driver_summary(chosen)
+    low, high = summary.get("interval", (summary["predicted_pos"],) * 2)
+    ui.stat_strip([
+        {"label": _("most_likely"),
+         "value": f"P{int(summary.get('most_likely_quali_pos', summary['predicted_pos']))}",
+         "sub": f"{_('quali_pos')} P{summary['predicted_pos']}", "accent": theme.ACCENT},
+        {"label": _("confidence_range"), "value": f"P{low} – P{high}",
+         "sub": f"{_('expected_quali')} P{summary.get('expected_quali_pos', 0):.1f}"},
+        {"label": _("p_pole"), "value": f"{summary.get('p_pole', 0):.1%}",
+         "accent": theme.GOLD},
+        {"label": _("p_front_row"), "value": f"{summary.get('p_front_row', 0):.1%}"},
+        {"label": _("p_q3"), "value": f"{summary.get('p_q3', 0):.1%}",
+         "sub": f"{_('practice_used')}: {quali.practice_session or '—'}"},
+    ])
+
+    odds = quali.driver_odds(chosen)
+    st.plotly_chart(
+        ui.quali_slot_chart(odds, summary["driver_name"], summary["team"], (low, high)),
+        width="stretch",
+    )
+
+    with st.expander(f"📊 {_('slot_odds')} · {_('tab_quali')}"):
+        st.caption(
+            "Each cell is the share of simulated sessions in which that driver "
+            "qualified in that slot."
+        )
+        st.plotly_chart(
+            ui.position_heatmap(quali.simulation, quali.table),
+            width="stretch", key="quali_sim_heatmap",
+        )
+
+    view = odds.copy()
+    view.columns = [_("pos"), _("slot_odds"), _("this_or_better")]
+    st.dataframe(
+        view, hide_index=True, width="stretch",
+        column_config={
+            _("slot_odds"): st.column_config.ProgressColumn(
+                format="%.1f%%", min_value=0.0, max_value=1.0
+            ),
+            _("this_or_better"): st.column_config.ProgressColumn(
+                format="%.1f%%", min_value=0.0, max_value=1.0
+            ),
+        },
+    )
+    st.download_button(
+        "⬇️ Download grid-slot odds (CSV)",
+        odds.to_csv(index=False).encode("utf-8"),
+        file_name=(
+            f"f1predict_quali_{selection['year']}"
+            f"_r{selection['round']:02d}_{chosen}.csv"
+        ),
+        mime="text/csv",
+    )
 
 
 def championship_tab(selection: dict, _) -> None:
@@ -586,6 +696,7 @@ def _labels(_) -> dict[str, str]:
         "p_podium": _("p_podium"), "p_points": _("p_points"), "p_dnf": _("p_dnf"),
         "expected_points": _("expected_points"),
         "predicted_quali_pos": _("quali_pos"), "approx_gap_s": _("gap"),
+        "p_pole": _("p_pole"), "p_front_row": _("p_front_row"), "p_q3": _("p_q3"),
         "fp_best_gap_pct": "FP best gap %", "fp_pace_gap_pct": "FP race pace gap %",
     }
 
@@ -661,10 +772,7 @@ def main() -> None:
             race_tab(prediction, _)
 
     with tabs[1]:
-        if prediction is None:
-            st.info(_("select_prompt"), icon="👈")
-        else:
-            quali_tab(prediction, _)
+        quali_tab(prediction, selection, _)
 
     with tabs[2]:
         championship_tab(selection, _)

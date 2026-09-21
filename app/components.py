@@ -356,6 +356,50 @@ def head_to_head(simulation, table: pd.DataFrame, a: str, b: str) -> go.Figure:
     return style_figure(fig, height=110, legend=False)
 
 
+def quali_slot_chart(
+    odds: pd.DataFrame,
+    driver_name: str,
+    team: str,
+    interval: tuple[int, int] | None = None,
+) -> go.Figure:
+    """One driver's chance of taking each grid slot.
+
+    Slots outside the likely band are dimmed rather than dropped: the tail is
+    part of the forecast, just not the part worth planning around.
+    """
+    if odds.empty:
+        return style_figure(go.Figure(), height=200, legend=False)
+
+    positions = odds["position"].to_numpy()
+    probability = odds["probability"].to_numpy()
+    inside = (
+        (positions >= interval[0]) & (positions <= interval[1])
+        if interval else np.ones(len(positions), dtype=bool)
+    )
+    colour = team_color(team)
+
+    fig = go.Figure(go.Bar(
+        x=[f"P{p}" for p in positions], y=probability,
+        marker={"color": [colour if flag else BORDER for flag in inside],
+                "line": {"color": TEXT, "width": 0.5}},
+        text=[f"{v:.0%}" if v >= 0.02 else "" for v in probability],
+        textposition="outside", textfont={"color": TEXT_DIM, "size": 10},
+        customdata=odds["cumulative"],
+        hovertemplate=(
+            "%{x}<br>%{y:.1%} of sessions"
+            "<br>This slot or better %{customdata:.1%}<extra></extra>"
+        ),
+    ))
+    fig.update_layout(
+        title={"text": f"{driver_name} — where the grid slot lands",
+               "font": {"size": 13}},
+        yaxis={"tickformat": ".0%", "title": "",
+               "range": [0, max(float(probability.max()), 0.05) * 1.25]},
+        xaxis={"title": ""},
+    )
+    return style_figure(fig, height=330, legend=False)
+
+
 def weather_strip(weather: dict) -> None:
     """Compact weather readout with the forecast source made explicit."""
     rain = float(weather.get("rain_prob", 0.0))
@@ -411,7 +455,20 @@ def race_table(table: pd.DataFrame, labels: dict[str, str]) -> None:
 
 def quali_table(table: pd.DataFrame, labels: dict[str, str]) -> None:
     columns = ["predicted_quali_pos", "driver_name", "team", "approx_gap_s",
+               "p_pole", "p_front_row", "p_q3",
                "fp_best_gap_pct", "fp_pace_gap_pct"]
     view = table[[c for c in columns if c in table.columns]].copy()
     view.columns = [labels.get(c, c) for c in view.columns]
-    st.dataframe(view, hide_index=True, height=min(760, 38 * len(view) + 40))
+
+    # The probability columns only exist once the session has been simulated.
+    bars = {
+        labels[key]: st.column_config.ProgressColumn(
+            format="%.1f%%", min_value=0.0, max_value=1.0
+        )
+        for key in ("p_pole", "p_front_row", "p_q3")
+        if labels.get(key) in view.columns
+    }
+    st.dataframe(
+        view, hide_index=True, height=min(760, 38 * len(view) + 40),
+        column_config=bars,
+    )
