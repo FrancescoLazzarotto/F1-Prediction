@@ -27,6 +27,7 @@ from f1predict.reporting import (
     render_championship,
     render_explanation,
     render_quali,
+    render_quali_odds,
     render_race,
     render_schedule,
     render_standings,
@@ -226,30 +227,58 @@ def quali(
     gp: str | None = typer.Option(None, "--gp", "-g"),
     next_race: bool = typer.Option(False, "--next", "-n"),
     last_race: bool = typer.Option(False, "--last", "-l"),
+    driver: str | None = typer.Option(
+        None, "--driver", "-d",
+        help="Driver code, e.g. VER. Shows that driver's chance of each grid slot.",
+    ),
     output: Path | None = typer.Option(None, "--output", "-o"),
+    simulations: int | None = typer.Option(
+        None, "--simulations", "-s", help="Override the Monte Carlo sample count."
+    ),
 ) -> None:
     """Predict the qualifying order from Free Practice pace."""
     event = _resolve(year, round_num, gp, next_race, last_race)
+    cfg = get_config()
+    if simulations:
+        from dataclasses import replace
+
+        cfg = replace(cfg, simulation=replace(cfg.simulation, n_simulations=simulations))
+        set_config(cfg)
+
     console.rule(
         f"[bold magenta]Qualifying · {event.name} {event.year} R{event.round}[/bold magenta]"
     )
 
-    pipeline = F1Pipeline(get_config())
+    pipeline = F1Pipeline(cfg)
     try:
-        result = pipeline.predict_quali(event.year, event.round, progress=_progress)
+        prediction = pipeline.simulate_quali(event.year, event.round, progress=_progress)
     except Exception as exc:
         _fail(str(exc), exc)
         return
 
-    if result.empty:
+    if prediction.is_empty:
         console.print(
             "[yellow]No qualifying prediction available — practice data is missing "
             "for this event.[/yellow]"
         )
         raise typer.Exit(0)
 
-    render_quali(result)
-    _export(result, output)
+    if not prediction.from_practice:
+        console.print(
+            "[yellow]Note:[/yellow] [dim]no practice timing for this event yet, so the "
+            "order below comes from form alone.[/dim]"
+        )
+
+    if driver:
+        try:
+            render_quali_odds(prediction, driver.upper())
+        except KeyError as exc:
+            _fail(str(exc), exc)
+            return
+        console.print()
+
+    render_quali(prediction.table)
+    _export(prediction.table, output)
 
 
 # ── train ─────────────────────────────────────────────────────────────────────

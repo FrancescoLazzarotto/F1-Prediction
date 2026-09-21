@@ -15,7 +15,7 @@ from rich.table import Table
 from rich.text import Text
 
 from f1predict.constants import PODIUM_COLORS
-from f1predict.pipeline import BacktestResult, RacePrediction
+from f1predict.pipeline import BacktestResult, QualiPrediction, RacePrediction
 
 console = Console()
 
@@ -89,6 +89,66 @@ def render_quali(quali: pd.DataFrame, title: str = "Predicted qualifying order")
             "pole" if position == 1 else f"+{gap:.3f}s",
             style=position_style(position),
         )
+    console.print(table)
+
+
+def render_quali_odds(
+    prediction: QualiPrediction, driver_code: str, max_rows: int = 12
+) -> None:
+    """Print one driver's simulated qualifying: every slot and its likelihood.
+
+    Raises:
+        KeyError: if the driver is not entered for this event.
+    """
+    summary = prediction.driver_summary(driver_code)
+    odds = prediction.driver_odds(driver_code)
+    if odds.empty:
+        console.print("[yellow]No simulation available for this session.[/yellow]")
+        return
+
+    low, high = summary.get("interval", (0, 0))
+    header = Table.grid(padding=(0, 3))
+    header.add_row(
+        _metric("Most likely", f"P{int(summary.get('most_likely_quali_pos', 0))}"),
+        _metric("Model order", f"P{summary['predicted_pos']}"),
+        _metric("Pole", _pct(summary.get("p_pole"))),
+        _metric("Front row", _pct(summary.get("p_front_row"))),
+        _metric("Into Q3", _pct(summary.get("p_q3"))),
+        _metric(f"{summary.get('interval_mass', 0.8):.0%} range", f"P{low}–P{high}"),
+    )
+    source = summary["practice_session"] or "form only — no practice timing"
+    console.print(Panel(
+        header,
+        title=f"[bold magenta]{summary['driver_name']} · {summary['team']}[/bold magenta]",
+        subtitle=f"[dim]from {source}[/dim]",
+        border_style="magenta",
+    ))
+
+    # Long tails of near-zero slots say nothing, so keep the likeliest ones and
+    # fold the remainder into a single line. Taking the *first* rows instead
+    # would show a backmarker nothing but the tail they never reach.
+    shown = odds.nlargest(max_rows, "probability")
+    shown = shown[shown["probability"] > 0].sort_values("position")
+    table = Table(show_header=True, header_style="bold magenta", box=None)
+    table.add_column("Slot", justify="right", width=5)
+    table.add_column("Chance", justify="right", width=8)
+    table.add_column("", width=24)
+    table.add_column("This or better", justify="right", width=15, style="dim")
+
+    for _, row in shown.iterrows():
+        position = int(row["position"])
+        table.add_row(
+            f"P{position}", _pct(row["probability"]),
+            f"[magenta]{'█' * max(1, round(row['probability'] * 24))}[/magenta]",
+            _pct(row["cumulative"]),
+            style=position_style(position),
+        )
+
+    remainder = float(
+        odds.loc[~odds["position"].isin(shown["position"]), "probability"].sum()
+    )
+    if remainder > 0:
+        table.add_row("rest", _pct(remainder), "", "100.0%", style="dim")
     console.print(table)
 
 
