@@ -61,6 +61,11 @@ data/{jolpica,fastf1_source,weather,offline}.py
   training-only or prediction-only branch to it.
 - **`simulation/race.py`** converts model scores into probabilities with one
   vectorised NumPy expression. Do not reintroduce a Python loop over simulations.
+- **`simulation/qualifying.py`** does the same for the qualifying session and
+  answers the per-driver question ("how likely is P3?"). Its spread is not a
+  tuned constant: it is solved for, so the simulated mean position error matches
+  the qualifying model's cross-validated MAE. Replacing that with a fixed number
+  would decouple the published percentages from measured accuracy.
 - **`data/repository.py`** decides between the Jolpica API, the parquet cache
   and the bundled CSV dump. Call this, not the individual sources.
 
@@ -81,7 +86,11 @@ already shipped once.
    `test_quali_model_features_never_touch_qualifying_data`.
 3. **The predicted grid must reach the race model.** When qualifying has not
    run, stage one's output becomes stage two's `grid_pos`. Guarded by
-   `test_predicts_the_grid_when_qualifying_has_not_run`.
+   `test_predicts_the_grid_when_qualifying_has_not_run`. `predicted_quali_pos`
+   is therefore always the deterministic rank of the model score, never the
+   qualifying simulation's average — otherwise the hand-off would move with the
+   Monte Carlo seed. Guarded by
+   `test_summarise_keeps_the_deterministic_model_order`.
 4. **Features are circuit-relative.** Gaps are percentages, positions are
    fractions of the field. Absolute lap times in seconds must never enter the
    schema — a 71 s lap means opposite things at the Red Bull Ring and at Spa.

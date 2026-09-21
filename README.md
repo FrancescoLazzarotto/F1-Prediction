@@ -61,6 +61,7 @@ to **medium**. The app always tells you which.
 |---|---|
 | 🎯 **Two-stage forecasting** | Predict the race days before qualifying, from practice pace alone |
 | 🎲 **Real probabilities** | 20 000 Monte Carlo races per prediction, with heteroscedastic spread — the midfield is modelled as less predictable than the front row, and rain widens everything |
+| ⏱️ **Qualifying slot odds** | Pick a driver and get their chance of every grid slot, with the spread calibrated against the qualifying model's own cross-validated error and widened for cars buried in a tight practice pack |
 | 💥 **Retirement modelling** | A dedicated classifier estimates each car's DNF risk and feeds it into the simulation, so a fast-but-fragile car is priced accordingly |
 | 🏆 **Championship projection** | Simulate every remaining round to get title probabilities and projected points ranges |
 | 🔍 **Explainability** | Ask *why* a driver is rated where they are and get their standout factors versus the field |
@@ -92,7 +93,9 @@ Six tabs, all driven by the same pipeline:
   probability bars, an expected-finish plot with P10–P90 whiskers, a full
   position-distribution heatmap, a grid→finish slope chart, per-driver
   explanations, and head-to-head odds between any two drivers.
-- **Qualifying** — the predicted grid with the practice signals behind it.
+- **Qualifying** — the predicted grid with the practice signals behind it, plus a
+  per-driver simulator: pick a driver and see the odds on every grid slot, the
+  shortest band holding 80% of the outcomes, and pole / front-row / Q3 chances.
 - **Championship** — title probabilities and projected points for drivers and
   constructors.
 - **Accuracy** — backtest one race or a whole season, with per-round scores.
@@ -112,6 +115,8 @@ f1predict predict --next -o out.csv          # export CSV or JSON
 
 # Qualifying only
 f1predict quali --next
+f1predict quali --next --driver VER          # one driver's chance of each grid slot
+f1predict quali -y 2025 -g monza -d LEC -s 50000
 
 # Training
 f1predict train                              # seasons from config
