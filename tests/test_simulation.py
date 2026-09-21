@@ -8,7 +8,13 @@ import pytest
 
 from f1predict.config import SimulationConfig
 from f1predict.constants import RACE_POINTS, is_dnf, points_for, team_color
-from f1predict.simulation import simulate_championship, simulate_race, summarise
+from f1predict.simulation import (
+    simulate_championship,
+    simulate_qualifying,
+    simulate_race,
+    summarise,
+    summarise_quali,
+)
 
 CODES = [f"D{i:02d}" for i in range(10)]
 SCORES = np.arange(1.0, 11.0)
@@ -113,6 +119,140 @@ class TestRaceSimulation:
         table = summarise(meta, SCORES, sim)
         assert table["predicted_pos"].tolist() == list(range(1, len(CODES) + 1))
         assert table["driver_code"].iloc[0] == "D00"
+
+
+class TestQualiSimulation:
+    """Grid-slot odds for one driver, simulated from practice-derived scores."""
+
+    def test_positions_form_a_valid_permutation_each_run(self, fast_sim_cfg):
+        sim = simulate_qualifying(SCORES, CODES, cfg=fast_sim_cfg)
+        assert sim.positions.shape == (fast_sim_cfg.n_simulations, len(CODES))
+        expected = np.arange(1, len(CODES) + 1)
+        for row in sim.positions[:25]:
+            assert np.array_equal(np.sort(row), expected)
+
+    def test_pole_probabilities_sum_to_one(self, fast_sim_cfg):
+        probabilities = simulate_qualifying(SCORES, CODES, cfg=fast_sim_cfg).probabilities()
+        assert probabilities["p_pole"].sum() == pytest.approx(1.0, abs=1e-9)
+
+    def test_nested_probabilities_are_consistent(self, fast_sim_cfg):
+        p = simulate_qualifying(SCORES, CODES, cfg=fast_sim_cfg).probabilities()
+        assert (p["p_pole"] <= p["p_front_row"] + 1e-12).all()
+        assert (p["p_front_row"] <= p["p_top3"] + 1e-12).all()
+        assert (p["p_top3"] <= p["p_q3"] + 1e-12).all()
+
+    def test_the_quickest_car_is_the_likeliest_pole(self, fast_sim_cfg):
+        probabilities = simulate_qualifying(SCORES, CODES, cfg=fast_sim_cfg).probabilities()
+        assert probabilities["p_pole"].idxmax() == 0
+        assert probabilities["expected_quali_pos"].is_monotonic_increasing
+
+    def test_driver_odds_cover_every_slot_and_sum_to_one(self, fast_sim_cfg):
+        odds = simulate_qualifying(SCORES, CODES, cfg=fast_sim_cfg).driver_odds("D03")
+        assert odds["position"].tolist() == list(range(1, len(CODES) + 1))
+        assert odds["probability"].sum() == pytest.approx(1.0, abs=1e-9)
+        assert odds["cumulative"].iloc[-1] == pytest.approx(1.0, abs=1e-9)
+        assert odds["cumulative"].is_monotonic_increasing
+
+    def test_driver_odds_reject_an_unknown_driver(self, fast_sim_cfg):
+        sim = simulate_qualifying(SCORES, CODES, cfg=fast_sim_cfg)
+        with pytest.raises(KeyError):
+            sim.driver_odds("NOPE")
+
+    def test_interval_holds_the_requested_probability_mass(self, fast_sim_cfg):
+        sim = simulate_qualifying(SCORES, CODES, cfg=fast_sim_cfg)
+        low, high = sim.interval("D04", mass=0.8)
+        assert 1 <= low <= high <= len(CODES)
+
+        odds = sim.driver_odds("D04").set_index("position")["probability"]
+        assert odds.loc[low:high].sum() >= 0.8 - 1e-9
+
+        # And it must be the *shortest* such band: no narrower window anywhere
+        # in the field carries the same mass.
+        narrower = high - low  # one slot fewer than the reported interval
+        for start in range(1, len(CODES) - narrower + 2):
+            assert odds.loc[start:start + narrower - 1].sum() < 0.8 - 1e-9
+
+    def test_the_spread_reproduces_the_models_own_error(self, fast_sim_cfg):
+        """The calibration is the whole basis for the published percentages.
+
+        A distribution that is arbitrarily wide or narrow would still look
+        plausible on screen, so the only check worth having is that a session
+        simulated with a stated model error is wrong by about that much.
+        """
+        gaps = np.linspace(0.0, 3.0, len(CODES))
+        for target in (1.0, 2.5):
+            for pace in (None, gaps):
+                sim = simulate_qualifying(
+                    SCORES, CODES, pace_gaps=pace,
+                    model_position_error=target, cfg=fast_sim_cfg,
+                )
+                error = np.abs(sim.positions - np.arange(1, len(CODES) + 1)).mean()
+                assert error == pytest.approx(target, rel=0.15)
+
+    def test_a_tighter_pack_widens_only_the_drivers_inside_it(self, fast_sim_cfg):
+        """Three cars covered by a hundredth are far less certain of their slot.
+
+        Compared against an evenly spread field rather than across the grid, so
+        the front-to-back ramp cannot be mistaken for the pack effect.
+        """
+        gaps = np.array([0.0, 0.9, 1.80, 1.81, 1.82, 3.0, 4.0, 5.0, 6.0, 7.0])
+        packed = simulate_qualifying(
+            SCORES, CODES, pace_gaps=gaps, model_position_error=1.5, cfg=fast_sim_cfg
+        )
+        even = simulate_qualifying(
+            SCORES, CODES, model_position_error=1.5, cfg=fast_sim_cfg
+        )
+
+        ratio = packed.sigma / even.sigma
+        assert ratio[3] > ratio[0]
+        assert ratio[3] > ratio[-1]
+
+    def test_the_front_of_the_grid_is_tighter_than_the_back(self, fast_sim_cfg):
+        """Pole is a two-car fight; P14 is a lottery between six cars."""
+        sim = simulate_qualifying(SCORES, CODES, model_position_error=1.5, cfg=fast_sim_cfg)
+        assert sim.sigma[0] < sim.sigma[-1]
+        assert list(sim.sigma) == sorted(sim.sigma)
+
+    def test_rain_widens_the_outcome_spread(self, fast_sim_cfg):
+        dry = simulate_qualifying(SCORES, CODES, rain_probability=0.0, cfg=fast_sim_cfg)
+        wet = simulate_qualifying(SCORES, CODES, rain_probability=1.0, cfg=fast_sim_cfg)
+        assert wet.probabilities()["p_pole"].iloc[0] < dry.probabilities()["p_pole"].iloc[0]
+
+    def test_position_distribution_rows_sum_to_one(self, fast_sim_cfg):
+        sim = simulate_qualifying(SCORES, CODES, cfg=fast_sim_cfg)
+        distribution = sim.position_distribution(max_position=len(CODES))
+        assert distribution.sum(axis=1).round(6).eq(1.0).all()
+
+    def test_head_to_head_is_complementary(self, fast_sim_cfg):
+        sim = simulate_qualifying(SCORES, CODES, cfg=fast_sim_cfg)
+        forward = sim.head_to_head("D00", "D05")
+        assert forward + sim.head_to_head("D05", "D00") == pytest.approx(1.0)
+        assert forward > 0.5
+
+    def test_is_reproducible_for_a_fixed_seed(self, fast_sim_cfg):
+        a = simulate_qualifying(SCORES, CODES, cfg=fast_sim_cfg).probabilities()
+        b = simulate_qualifying(SCORES, CODES, cfg=fast_sim_cfg).probabilities()
+        pd.testing.assert_frame_equal(a, b)
+
+    def test_rejects_an_empty_field(self, fast_sim_cfg):
+        with pytest.raises(ValueError):
+            simulate_qualifying(np.array([]), [], cfg=fast_sim_cfg)
+
+    def test_summarise_keeps_the_deterministic_model_order(self, fast_sim_cfg):
+        """The predicted order is the grid handed to the race model.
+
+        Ordering it by the simulated average instead would make the two-stage
+        hand-off depend on the Monte Carlo seed.
+        """
+        meta = pd.DataFrame({
+            "driver_code": CODES, "driver_name": CODES, "team": ["T"] * len(CODES),
+        })
+        sim = simulate_qualifying(SCORES, CODES, cfg=fast_sim_cfg)
+        table = summarise_quali(meta, SCORES, sim)
+
+        assert table["predicted_quali_pos"].tolist() == list(range(1, len(CODES) + 1))
+        assert table["driver_code"].tolist() == CODES
+        assert "p_pole" in table.columns
 
 
 class TestChampionshipSimulation:

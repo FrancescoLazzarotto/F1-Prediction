@@ -104,6 +104,9 @@ class SimulationConfig:
     backmarker_noise_scale: float = 0.9
     #: Spread multiplier at 100% rain probability.
     wet_noise_multiplier: float = 1.8
+    #: Qualifying spread, used only when the qualifying model reports no
+    #: cross-validated error for the simulation to calibrate itself against.
+    quali_position_noise_std: float = 1.6
     #: Fallback per-driver retirement probability when the DNF model is absent.
     base_dnf_rate: float = 0.09
     seed: int = 42

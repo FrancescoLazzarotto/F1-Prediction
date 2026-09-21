@@ -59,6 +59,10 @@ simulation:
   backmarker_noise_scale: 0.9
   # Multiplier applied to the spread at 100% rain probability.
   wet_noise_multiplier: 1.8
+  # Qualifying spread. Normally the simulation calibrates itself against the
+  # qualifying model's cross-validated error; this is the fallback for a model
+  # that was trained on too little data to be cross-validated.
+  quali_position_noise_std: 1.6
   # Used only when the DNF model is unavailable.
   base_dnf_rate: 0.09
   seed: 42
