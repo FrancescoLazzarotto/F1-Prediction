@@ -36,7 +36,15 @@ from f1predict.models.registry import (
     new_race_model,
     save_all,
 )
-from f1predict.simulation import RaceSimulation, simulate_championship, simulate_race, summarise
+from f1predict.simulation import (
+    QualiSimulation,
+    RaceSimulation,
+    simulate_championship,
+    simulate_qualifying,
+    simulate_race,
+    summarise,
+    summarise_quali,
+)
 
 log = logging.getLogger(__name__)
 
@@ -71,6 +79,79 @@ class RacePrediction:
 
     def to_records(self) -> list[dict]:
         return self.table.to_dict(orient="records")
+
+
+@dataclass(slots=True)
+class QualiPrediction:
+    """A qualifying forecast built from practice, with its outcome spread.
+
+    ``table`` is the predicted order; ``simulation`` is the Monte Carlo behind
+    it, which is what turns "P4" into "P4, but P2 to P7 four times out of five".
+    """
+
+    table: pd.DataFrame = field(default_factory=pd.DataFrame)
+    event: dict = field(default_factory=dict)
+    practice_session: str | None = None
+    simulation: QualiSimulation | None = None
+
+    @property
+    def is_empty(self) -> bool:
+        return self.table.empty
+
+    @property
+    def from_practice(self) -> bool:
+        """Whether real practice timing reached the model.
+
+        Without it the qualifying model still answers, but from form alone —
+        which is a much weaker claim and has to be labelled as one.
+        """
+        return self.practice_session is not None
+
+    @property
+    def confidence(self) -> str:
+        return "medium" if self.from_practice else "low"
+
+    @property
+    def driver_codes(self) -> list[str]:
+        return self.table["driver_code"].tolist() if not self.table.empty else []
+
+    def driver_odds(self, driver_code: str) -> pd.DataFrame:
+        """Per-position probabilities for one driver: the headline feature."""
+        if self.simulation is None:
+            return pd.DataFrame(columns=["position", "probability", "cumulative"])
+        return self.simulation.driver_odds(driver_code)
+
+    def driver_summary(self, driver_code: str, mass: float = 0.8) -> dict:
+        """One driver's forecast, flattened for rendering.
+
+        Raises:
+            KeyError: if the driver did not take part in this event.
+        """
+        rows = self.table[self.table["driver_code"] == driver_code]
+        if rows.empty:
+            raise KeyError(f"{driver_code} is not entered for this event.")
+
+        row = rows.iloc[0]
+        out = {
+            "driver_code": driver_code,
+            "driver_name": str(row.get("driver_name", driver_code)),
+            "team": str(row.get("team", "")),
+            "predicted_pos": int(row["predicted_quali_pos"]),
+            "practice_session": self.practice_session,
+            "confidence": self.confidence,
+        }
+        for column in (
+            "p_pole", "p_front_row", "p_top3", "p_q3", "p_q2",
+            "expected_quali_pos", "most_likely_quali_pos",
+        ):
+            if column in rows.columns:
+                out[column] = float(row[column])
+
+        if self.simulation is not None:
+            low, high = self.simulation.interval(driver_code, mass=mass)
+            out["interval"] = (low, high)
+            out["interval_mass"] = mass
+        return out
 
 
 @dataclass(slots=True)
@@ -224,7 +305,7 @@ class F1Pipeline:
             _report(progress, "Qualifying has not run — predicting the grid from practice…")
             quali_table = self._predict_quali(
                 year, round_num, history, quali_history, circuit, n_rounds, event
-            )
+            ).table
             if not quali_table.empty:
                 predicted_grid = quali_table[["driver_code", "driver_id", "predicted_quali_pos"]]
 
@@ -284,23 +365,41 @@ class F1Pipeline:
         self, year: int, round_num: int, progress: Progress | None = None
     ) -> pd.DataFrame:
         """Forecast the qualifying order from practice data."""
+        return self.simulate_quali(year, round_num, progress=progress).table
+
+    def simulate_quali(
+        self, year: int, round_num: int, progress: Progress | None = None
+    ) -> QualiPrediction:
+        """Forecast qualifying and how likely each driver is to take each slot.
+
+        Same model and the same practice-derived features as
+        :meth:`predict_quali`, but the Monte Carlo behind the order comes back
+        with it, so a caller can ask what a single driver's session is likely
+        to look like rather than only who ends up where.
+        """
         self.ensure_models(progress)
         event = _event_for(year, round_num)
+        _report(progress, f"Loading history for {year}…")
         history = repo.history_for(year, seasons_back=2, cfg=self.cfg)
         quali_history = repo.quali_history_for(year, seasons_back=2, cfg=self.cfg)
         circuit = repo.circuit_info(year, round_num, self.cfg)
         n_rounds = len(season_events(year)) or 24
-        return self._predict_quali(
+
+        _report(progress, "Simulating qualifying from practice pace…")
+        prediction = self._predict_quali(
             year, round_num, history, quali_history, circuit, n_rounds, event
         )
+        prediction.event = _event_dict(event, circuit, year, round_num)
+        _report(progress, "Done.")
+        return prediction
 
     def _predict_quali(
         self, year: int, round_num: int, history: pd.DataFrame,
         quali_history: pd.DataFrame, circuit: dict, n_rounds: int, event: Event | None,
-    ) -> pd.DataFrame:
+    ) -> QualiPrediction:
         if self._quali is None:
             log.warning("No qualifying model available.")
-            return pd.DataFrame()
+            return QualiPrediction()
 
         features = build_event_features(
             self.cfg, year, round_num,
@@ -309,20 +408,50 @@ class F1Pipeline:
             sprint_weekend=event.is_sprint if event else False,
         )
         if features.is_empty:
-            return pd.DataFrame()
+            return QualiPrediction()
 
         scores = self._quali.predict(features.features)
-        out = features.meta.reset_index(drop=True).copy()
-        out["quali_score"] = scores
-        out["predicted_quali_pos"] = pd.Series(scores).rank(method="first").astype(int)
+
+        meta = features.meta.reset_index(drop=True).copy()
         # Turn the score spread into an approximate lap-time gap, purely for
         # display: it is a monotone transform of the score, not a real time.
         spread = float(np.ptp(scores)) or 1.0
-        out["approx_gap_s"] = (scores - scores.min()) / spread * 1.6
+        meta["approx_gap_s"] = (scores - scores.min()) / spread * 1.6
         for column in ("fp_best_gap_pct", "fp_pace_gap_pct", "fp_rank_pct"):
             if column in features.features.columns:
-                out[column] = features.features[column].to_numpy()
-        return out.sort_values("predicted_quali_pos").reset_index(drop=True)
+                meta[column] = features.features[column].to_numpy()
+
+        simulation = simulate_qualifying(
+            scores=scores,
+            driver_codes=features.meta["driver_code"].tolist(),
+            pace_gaps=self._quali_pace_gaps(features),
+            # Calibrate the spread against the model's own out-of-sample error,
+            # so the published percentages track how accurate it really is.
+            model_position_error=getattr(self._quali.report, "cv_mae", float("nan")),
+            rain_probability=float(features.weather.get("rain_prob", 0.0)),
+            cfg=self.cfg.simulation,
+        )
+
+        return QualiPrediction(
+            table=summarise_quali(meta, scores, simulation),
+            practice_session=features.practice_session,
+            simulation=simulation,
+        )
+
+    @staticmethod
+    def _quali_pace_gaps(features: EventFeatures) -> np.ndarray | None:
+        """Practice gaps used to widen the spread inside a tight pack.
+
+        Only real practice timing tells us anything about how closely the field
+        is bunched; the neutral fallback the builder substitutes when a session
+        is missing would claim every car is identical, which would widen every
+        distribution to the same meaningless width.
+        """
+        if not features.practice_session:
+            return None
+        if "fp_best_gap_pct" not in features.features.columns:
+            return None
+        return features.features["fp_best_gap_pct"].to_numpy()
 
     # ── Explanation ───────────────────────────────────────────────────────────
 

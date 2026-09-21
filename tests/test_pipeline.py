@@ -227,6 +227,72 @@ class TestQualiPrediction:
         assert result["approx_gap_s"].is_monotonic_increasing
 
 
+class TestQualiSimulation:
+    """Per-driver grid-slot odds, simulated from a weekend's practice pace."""
+
+    def test_carries_the_simulation_and_its_probabilities(self, trained, entry_list):
+        prediction = trained.simulate_quali(2024, 3)
+        assert prediction.simulation is not None
+        assert prediction.simulation.positions.shape[1] == len(entry_list)
+        for column in ("p_pole", "p_front_row", "p_top3", "p_q3", "expected_quali_pos"):
+            assert column in prediction.table.columns
+        assert prediction.table["p_pole"].sum() == pytest.approx(1.0, abs=1e-6)
+
+    def test_runs_from_practice_not_from_the_qualifying_result(self, trained):
+        """Stage one predicts the session, so it must never look at it.
+
+        ``simulate_quali`` is reachable for a weekend whose qualifying has
+        already run, which is exactly when a leak would go unnoticed.
+        """
+        prediction = trained.simulate_quali(2024, 3)
+        assert prediction.from_practice
+        assert prediction.practice_session == "FP2"
+        assert prediction.confidence == "medium"
+
+    def test_driver_odds_sum_to_one_over_the_field(self, trained, entry_list):
+        prediction = trained.simulate_quali(2024, 3)
+        odds = prediction.driver_odds(prediction.driver_codes[0])
+        assert len(odds) == len(entry_list)
+        assert odds["probability"].sum() == pytest.approx(1.0, abs=1e-9)
+
+    def test_driver_summary_describes_one_entry(self, trained):
+        prediction = trained.simulate_quali(2024, 3)
+        code = prediction.driver_codes[0]
+        summary = prediction.driver_summary(code)
+
+        assert summary["driver_code"] == code
+        assert summary["predicted_pos"] == 1
+        assert 0.0 <= summary["p_pole"] <= 1.0
+        low, high = summary["interval"]
+        assert 1 <= low <= summary["most_likely_quali_pos"] <= high
+
+    def test_driver_summary_rejects_a_driver_who_is_not_entered(self, trained):
+        prediction = trained.simulate_quali(2024, 3)
+        with pytest.raises(KeyError):
+            prediction.driver_summary("XXX")
+
+    def test_the_predicted_order_matches_the_plain_prediction(self, trained):
+        """One code path, two entry points: the order must not drift between them."""
+        table = trained.predict_quali(2024, 3)
+        simulated = trained.simulate_quali(2024, 3).table
+        assert table["driver_code"].tolist() == simulated["driver_code"].tolist()
+
+    def test_event_context_is_populated(self, trained):
+        prediction = trained.simulate_quali(2024, 3)
+        assert prediction.event["year"] == 2024
+        assert prediction.event["round"] == 3
+
+    def test_an_empty_entry_list_yields_an_empty_prediction(self, trained):
+        from f1predict.data import fastf1_source as F1
+
+        with patch.object(F1, "get_entry_list", lambda *a, **k: pd.DataFrame()):
+            prediction = trained.simulate_quali(2024, 3)
+
+        assert prediction.is_empty
+        assert prediction.simulation is None
+        assert prediction.driver_odds("VER").empty
+
+
 class TestExplanation:
     def test_returns_ranked_contributions(self, trained):
         prediction = trained.predict_race(2024, 3)
