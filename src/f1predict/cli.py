@@ -258,8 +258,8 @@ def quali(
 
     if prediction.is_empty:
         console.print(
-            "[yellow]No qualifying prediction available — practice data is missing "
-            "for this event.[/yellow]"
+            "[yellow]No qualifying prediction available — no entry list for this "
+            "event and no earlier race to take one from.[/yellow]"
         )
         raise typer.Exit(0)
 
@@ -267,6 +267,12 @@ def quali(
         console.print(
             "[yellow]Note:[/yellow] [dim]no practice timing for this event yet, so the "
             "order below comes from form alone.[/dim]"
+        )
+
+    if prediction.lineup_estimated:
+        console.print(
+            "[yellow]Note:[/yellow] [dim]the entry list is not out yet, so the "
+            "line-up is the previous race's.[/dim]"
         )
 
     if driver:

@@ -62,6 +62,9 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "quali_from_form": (
             "No practice timing for this event yet, so this comes from form alone."
         ),
+        "lineup_estimated": (
+            "The entry list is not out yet, so the line-up is the previous race's."
+        ),
         "no_quali_sim": "Run the simulation to see a driver's grid-slot odds.",
         # Race context
         "circuit": "Circuit",
@@ -159,6 +162,10 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "quali_from_form": (
             "Nessun dato delle libere per questo evento: la previsione viene "
             "solo dalla forma recente."
+        ),
+        "lineup_estimated": (
+            "La entry list non è ancora uscita: la griglia dei piloti è quella "
+            "dell'ultima gara."
         ),
         "no_quali_sim": (
             "Avvia la simulazione per vedere le probabilità di griglia di un pilota."

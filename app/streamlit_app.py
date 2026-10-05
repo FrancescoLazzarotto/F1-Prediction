@@ -320,11 +320,14 @@ def quali_tab(prediction, selection: dict, _) -> None:
         st.info(_("select_prompt"), icon="👈")
     elif prediction.quali_table is not None and not prediction.quali_table.empty:
         st.markdown(f"#### {_('tab_quali')}")
-        ui.note(
-            f"Predicted from {prediction.practice_session or 'practice'} pace: best "
-            "lap, long-run stints, theoretical best lap and the gap to each driver's "
-            "teammate."
-        )
+        if prediction.practice_session:
+            ui.note(
+                f"Predicted from {prediction.practice_session} pace: best "
+                "lap, long-run stints, theoretical best lap and the gap to each driver's "
+                "teammate."
+            )
+        else:
+            ui.note(_("quali_from_form"))
         ui.quali_table(prediction.quali_table, _labels(_))
     elif prediction.grid_source == "actual_quali":
         st.info(
@@ -389,6 +392,8 @@ def quali_simulator(selection: dict, _) -> None:
         return
     if not quali.from_practice:
         st.warning(_("quali_from_form"), icon="⚠️")
+    if quali.lineup_estimated:
+        st.warning(_("lineup_estimated"), icon="⚠️")
 
     names = dict(zip(
         quali.table["driver_code"], quali.table["driver_name"], strict=False
