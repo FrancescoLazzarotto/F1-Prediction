@@ -85,6 +85,14 @@ QUALI_FEATURES: tuple[Feature, ...] = (
     _f("teammate_fp_delta_pct", "Practice gap to teammate (%)", 0.0),
 )
 
+#: What the qualifying model can still see when no practice session exists
+#: (before FP1, or when its timing could not be loaded). A separate model is
+#: trained on just these columns: feeding the practice-aware one a column of
+#: neutral constants would leave it leaning on signals that are not there.
+QUALI_FORM_FEATURES: tuple[Feature, ...] = tuple(
+    f for f in QUALI_FEATURES if not f.name.startswith(("fp_", "teammate_fp_"))
+)
+
 # ── Retirement model ──────────────────────────────────────────────────────────
 
 DNF_FEATURES: tuple[Feature, ...] = (
@@ -118,6 +126,7 @@ def by_name(name: str) -> Feature | None:
 
 RACE_FEATURE_COLS = names(RACE_FEATURES)
 QUALI_FEATURE_COLS = names(QUALI_FEATURES)
+QUALI_FORM_FEATURE_COLS = names(QUALI_FORM_FEATURES)
 DNF_FEATURE_COLS = names(DNF_FEATURES)
 
 #: Union of every column the builder must produce.

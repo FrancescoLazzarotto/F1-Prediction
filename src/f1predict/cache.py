@@ -21,6 +21,7 @@ log = logging.getLogger(__name__)
 
 RACE_MODEL = "race_model"
 QUALI_MODEL = "quali_model"
+QUALI_FORM_MODEL = "quali_form_model"
 DNF_MODEL = "dnf_model"
 
 

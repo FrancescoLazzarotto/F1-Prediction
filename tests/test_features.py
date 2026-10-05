@@ -300,6 +300,13 @@ class TestSchema:
                      schema.DNF_FEATURE_COLS):
             assert len(cols) == len(set(cols))
 
+    def test_the_practice_free_quali_model_sees_no_practice_column(self):
+        """It is the fallback for weekends with no practice; a fp_ column would be constant."""
+        assert schema.QUALI_FORM_FEATURE_COLS
+        assert set(schema.QUALI_FORM_FEATURE_COLS) < set(schema.QUALI_FEATURE_COLS)
+        for name in schema.QUALI_FORM_FEATURE_COLS:
+            assert not name.startswith(("fp_", "teammate_fp_"))
+
     def test_lookup_covers_all_columns(self):
         for name in schema.ALL_FEATURE_COLS:
             assert schema.by_name(name) is not None

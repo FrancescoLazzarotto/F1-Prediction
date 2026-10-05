@@ -46,6 +46,15 @@ def new_quali_model(cfg: Config, seasons: list[int] | None = None) -> RankingPre
     )
 
 
+def new_quali_form_model(cfg: Config, seasons: list[int] | None = None) -> RankingPredictor:
+    """Qualifying model for weekends with no practice timing to read."""
+    model_cfg = cfg.models.quali
+    return RankingPredictor(
+        features=schema.QUALI_FORM_FEATURES, kind=model_cfg.kind, params=model_cfg.params,
+        metadata=_metadata(cfg, model_cfg.kind, seasons),
+    )
+
+
 def new_dnf_model(cfg: Config, seasons: list[int] | None = None) -> DnfPredictor:
     model_cfg = cfg.models.dnf
     return DnfPredictor(
@@ -54,9 +63,12 @@ def new_dnf_model(cfg: Config, seasons: list[int] | None = None) -> DnfPredictor
     )
 
 
-def save_all(cfg: Config, race, quali, dnf) -> None:
-    """Persist the three models that make up a full prediction."""
-    for name, model in ((C.RACE_MODEL, race), (C.QUALI_MODEL, quali), (C.DNF_MODEL, dnf)):
+def save_all(cfg: Config, race, quali, dnf, quali_form=None) -> None:
+    """Persist the models that make up a full prediction."""
+    for name, model in (
+        (C.RACE_MODEL, race), (C.QUALI_MODEL, quali), (C.DNF_MODEL, dnf),
+        (C.QUALI_FORM_MODEL, quali_form),
+    ):
         if model is not None:
             C.save_model(cfg, name, model)
 
@@ -68,6 +80,15 @@ def load_all(cfg: Config) -> tuple[RankingPredictor | None, RankingPredictor | N
     quali = _load_checked(cfg, C.QUALI_MODEL)
     dnf = _load_checked(cfg, C.DNF_MODEL)
     return race, quali, dnf
+
+
+def load_quali_form(cfg: Config) -> RankingPredictor | None:
+    """The practice-free qualifying model, or ``None`` when absent or stale.
+
+    Kept out of :func:`load_all` because it is optional: a cache written before
+    it existed is still fully usable, just without the fallback.
+    """
+    return _load_checked(cfg, C.QUALI_FORM_MODEL)
 
 
 def _load_checked(cfg: Config, name: str):
@@ -100,12 +121,16 @@ def models_ready(cfg: Config) -> bool:
 def describe(cfg: Config) -> dict:
     """Model-card style summary of what is currently on disk."""
     race, quali, dnf = load_all(cfg)
+    quali_form = load_quali_form(cfg)
     out: dict = {
         "feature_signature": cfg.feature_signature,
         "schema_version": schema.SCHEMA_VERSION,
         "models": {},
     }
-    for name, model in ((C.RACE_MODEL, race), (C.QUALI_MODEL, quali), (C.DNF_MODEL, dnf)):
+    for name, model in (
+        (C.RACE_MODEL, race), (C.QUALI_MODEL, quali), (C.QUALI_FORM_MODEL, quali_form),
+        (C.DNF_MODEL, dnf),
+    ):
         if model is None:
             out["models"][name] = {"status": "missing or stale"}
             continue

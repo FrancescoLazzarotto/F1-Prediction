@@ -207,10 +207,11 @@ class TestRacePrediction:
         assert prediction.simulation is not None
         assert prediction.simulation.positions.shape[1] == len(entry_list)
 
-    def test_empty_entry_list_raises_a_clear_error(self, trained):
+    def test_no_entry_list_and_no_history_raises_a_clear_error(self, trained):
         from f1predict.data import fastf1_source as F1
+        from f1predict.data import repository as repo
 
-        with patch.object(F1, "get_entry_list", lambda *a, **k: pd.DataFrame()):
+        with patch.object(F1, "get_entry_list", lambda *a, **k: pd.DataFrame()),              patch.object(repo, "history_for", lambda *a, **k: pd.DataFrame()):
             with pytest.raises(RuntimeError, match="No data available"):
                 trained.predict_race(2024, 3)
 
@@ -282,15 +283,85 @@ class TestQualiSimulation:
         assert prediction.event["year"] == 2024
         assert prediction.event["round"] == 3
 
-    def test_an_empty_entry_list_yields_an_empty_prediction(self, trained):
+    def test_no_entry_list_and_no_history_yields_an_empty_prediction(self, trained):
         from f1predict.data import fastf1_source as F1
+        from f1predict.data import repository as repo
 
-        with patch.object(F1, "get_entry_list", lambda *a, **k: pd.DataFrame()):
+        with patch.object(F1, "get_entry_list", lambda *a, **k: pd.DataFrame()),              patch.object(repo, "history_for", lambda *a, **k: pd.DataFrame()):
             prediction = trained.simulate_quali(2024, 3)
 
         assert prediction.is_empty
         assert prediction.simulation is None
         assert prediction.driver_odds("VER").empty
+
+    def test_runs_without_practice_from_the_form_only_model(self, trained, entry_list):
+        """No practice timing is not a reason to refuse: form still says something."""
+        from f1predict.features import builder
+
+        with patch.object(builder, "_cached_practice", lambda *a, **k: None):
+            prediction = trained.simulate_quali(2024, 3)
+
+        assert not prediction.is_empty
+        assert not prediction.from_practice
+        assert prediction.confidence == "low"
+        assert len(prediction.table) == len(entry_list)
+        assert prediction.table["p_pole"].sum() == pytest.approx(1.0, abs=1e-6)
+
+    def test_without_practice_the_form_model_does_the_scoring(self, trained):
+        from f1predict.features import builder
+
+        calls = {"form": 0, "full": 0}
+        form_predict, full_predict = trained._quali_form.predict, trained._quali.predict
+        trained._quali_form.predict = lambda X: (
+            calls.__setitem__("form", calls["form"] + 1) or form_predict(X)
+        )
+        trained._quali.predict = lambda X: (
+            calls.__setitem__("full", calls["full"] + 1) or full_predict(X)
+        )
+
+        with patch.object(builder, "_cached_practice", lambda *a, **k: None):
+            trained.simulate_quali(2024, 3)
+        assert calls == {"form": 1, "full": 0}
+
+        trained.simulate_quali(2024, 3)
+        assert calls == {"form": 1, "full": 1}
+
+    def test_a_cache_without_the_form_model_still_answers(self, trained):
+        from f1predict.features import builder
+
+        trained._quali_form = None
+        with patch.object(builder, "_cached_practice", lambda *a, **k: None):
+            prediction = trained.simulate_quali(2024, 3)
+
+        assert not prediction.is_empty
+        assert not prediction.from_practice
+
+    def test_a_weekend_with_no_entry_list_borrows_the_last_races_line_up(
+        self, trained, season_results
+    ):
+        """Before FP1 FastF1 has no entry list; the previous race stands in."""
+        from f1predict.data import fastf1_source as F1
+
+        with patch.object(F1, "get_entry_list", lambda *a, **k: pd.DataFrame()):
+            prediction = trained.simulate_quali(2024, 3)
+
+        previous = season_results[(season_results["year"] == 2024) & (season_results["round"] == 2)]
+        assert prediction.lineup_estimated
+        assert set(prediction.driver_codes) == set(previous["driver_code"])
+
+    def test_a_real_entry_list_is_not_flagged_as_an_estimate(self, trained):
+        assert not trained.simulate_quali(2024, 3).lineup_estimated
+
+    def test_race_prediction_survives_a_weekend_that_has_not_started(self, trained):
+        """No entry list and no practice: both stages fall back, end to end."""
+        from f1predict.data import fastf1_source as F1
+        from f1predict.features import builder
+
+        with patch.object(F1, "get_entry_list", lambda *a, **k: pd.DataFrame()),              patch.object(builder, "_cached_practice", lambda *a, **k: None):
+            prediction = trained.predict_race(2024, 3, force_grid_source="predicted_quali")
+
+        assert not prediction.table.empty
+        assert prediction.grid_source == GRID_PREDICTED
 
 
 class TestExplanation:

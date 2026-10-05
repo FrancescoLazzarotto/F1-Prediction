@@ -31,7 +31,9 @@ from f1predict.models.metrics import RankingMetrics, aggregate, brier_score, eva
 from f1predict.models.predictor import DnfPredictor, RankingPredictor
 from f1predict.models.registry import (
     load_all,
+    load_quali_form,
     new_dnf_model,
+    new_quali_form_model,
     new_quali_model,
     new_race_model,
     save_all,
@@ -93,6 +95,8 @@ class QualiPrediction:
     event: dict = field(default_factory=dict)
     practice_session: str | None = None
     simulation: QualiSimulation | None = None
+    #: The entry list did not exist yet, so the previous race's line-up stood in.
+    lineup_estimated: bool = False
 
     @property
     def is_empty(self) -> bool:
@@ -177,6 +181,7 @@ class F1Pipeline:
         C.ensure_dirs(self.cfg)
         self._race: RankingPredictor | None = None
         self._quali: RankingPredictor | None = None
+        self._quali_form: RankingPredictor | None = None
         self._dnf: DnfPredictor | None = None
         self._loaded = False
 
@@ -188,6 +193,7 @@ class F1Pipeline:
             return
 
         self._race, self._quali, self._dnf = load_all(self.cfg)
+        self._quali_form = load_quali_form(self.cfg)
         self._loaded = True
         if self._race is not None and self._quali is not None:
             log.info("Loaded cached models.")
@@ -200,6 +206,7 @@ class F1Pipeline:
     def models_ready(self) -> bool:
         if not self._loaded:
             self._race, self._quali, self._dnf = load_all(self.cfg)
+            self._quali_form = load_quali_form(self.cfg)
             self._loaded = True
         return self._race is not None and self._quali is not None
 
@@ -239,6 +246,7 @@ class F1Pipeline:
         quali_rows = train_df.dropna(subset=["quali_pos_actual"])
         quali_report = None
         quali_model = None
+        quali_form_model = None
         if len(quali_rows) >= 30:
             _report(progress, f"Training qualifying model on {len(quali_rows)} sessions…")
             quali_model = new_quali_model(self.cfg, seasons)
@@ -251,6 +259,19 @@ class F1Pipeline:
                 min_samples_for_cv=self.cfg.training.min_samples_for_cv,
             )
             _report(progress, f"  Qualifying model: {quali_report.summary()}")
+
+            # Same sessions, practice columns removed: what to fall back on when
+            # a weekend has no practice timing to read.
+            quali_form_model = new_quali_form_model(self.cfg, seasons)
+            form_report = quali_form_model.fit(
+                quali_rows[schema.QUALI_FORM_FEATURE_COLS],
+                quali_rows["quali_pos_actual"],
+                groups=quali_rows["race_id"],
+                sample_weight=weights[quali_rows.index],
+                cv_folds=self.cfg.training.cv_folds,
+                min_samples_for_cv=self.cfg.training.min_samples_for_cv,
+            )
+            _report(progress, f"  Qualifying model, no practice: {form_report.summary()}")
         else:
             _report(progress, "  Not enough qualifying data to train that model.")
 
@@ -263,8 +284,9 @@ class F1Pipeline:
         )
         _report(progress, f"  Retirement model: {dnf_report.summary()}")
 
-        save_all(self.cfg, race_model, quali_model, dnf_model)
+        save_all(self.cfg, race_model, quali_model, dnf_model, quali_form_model)
         self._race, self._quali, self._dnf = race_model, quali_model, dnf_model
+        self._quali_form = quali_form_model
         self._loaded = True
 
         _report(progress, "Training complete.")
@@ -410,7 +432,8 @@ class F1Pipeline:
         if features.is_empty:
             return QualiPrediction()
 
-        scores = self._quali.predict(features.features)
+        model = self._quali_model_for(features)
+        scores = model.predict(features.features)
 
         meta = features.meta.reset_index(drop=True).copy()
         # Turn the score spread into an approximate lap-time gap, purely for
@@ -427,7 +450,7 @@ class F1Pipeline:
             pace_gaps=self._quali_pace_gaps(features),
             # Calibrate the spread against the model's own out-of-sample error,
             # so the published percentages track how accurate it really is.
-            model_position_error=getattr(self._quali.report, "cv_mae", float("nan")),
+            model_position_error=getattr(model.report, "cv_mae", float("nan")),
             rain_probability=float(features.weather.get("rain_prob", 0.0)),
             cfg=self.cfg.simulation,
         )
@@ -436,7 +459,24 @@ class F1Pipeline:
             table=summarise_quali(meta, scores, simulation),
             practice_session=features.practice_session,
             simulation=simulation,
+            lineup_estimated=features.entries_estimated,
         )
+
+    def _quali_model_for(self, features: EventFeatures) -> RankingPredictor:
+        """The practice-aware model when practice reached the builder.
+
+        Without it, that model would be fed constants where it expects pace and
+        would still answer, confidently and for the wrong reasons. A cache that
+        predates the practice-free model falls back to it anyway.
+        """
+        if features.practice_session is None:
+            if self._quali_form is not None:
+                return self._quali_form
+            log.warning(
+                "No practice timing and no practice-free qualifying model cached; "
+                "run `f1predict train` to build one."
+            )
+        return self._quali
 
     @staticmethod
     def _quali_pace_gaps(features: EventFeatures) -> np.ndarray | None:

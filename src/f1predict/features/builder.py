@@ -45,6 +45,9 @@ class EventFeatures:
     circuit: dict = field(default_factory=dict)
     grid_source: str = GRID_FORM
     practice_session: str | None = None
+    #: True when no entry list existed yet and the line-up was taken from the
+    #: previous race, so a late driver change would not be reflected.
+    entries_estimated: bool = False
 
     @property
     def is_empty(self) -> bool:
@@ -88,9 +91,18 @@ def build_event_features(
     circuit_info = circuit_info or repo.circuit_info(year, round_num, cfg)
 
     entry_list = entries if entries is not None else F1.get_entry_list(year, round_num)
+    entries_estimated = False
+    if entries is None and (entry_list is None or entry_list.empty):
+        # FastF1 only knows the line-up once a session has run, so before FP1
+        # the best available answer is whoever raced last.
+        entry_list = _entries_from_history(history, year, round_num)
+        entries_estimated = not entry_list.empty
     if entry_list is None or entry_list.empty:
         log.warning("No entry list available for %d R%d", year, round_num)
         return EventFeatures(meta=pd.DataFrame(), features=pd.DataFrame())
+    if entries_estimated:
+        log.info("No entry list for %d R%d yet; using the previous race's line-up.",
+                 year, round_num)
 
     entry_list = _with_constructor_ids(entry_list, history)
 
@@ -120,6 +132,7 @@ def build_event_features(
         meta=meta, features=features, weather=weather, circuit=circuit_info,
         grid_source=grid_source,
         practice_session=practice.session_name if practice else None,
+        entries_estimated=entries_estimated,
     )
 
 
@@ -289,6 +302,32 @@ def _with_constructor_ids(entries: pd.DataFrame, history: pd.DataFrame) -> pd.Da
             entries.loc[missing, "team"].str.lower().str.replace(r"[^a-z0-9]+", "_", regex=True)
         )
     return entries
+
+
+def _entries_from_history(history: pd.DataFrame | None, year: int, round_num: int) -> pd.DataFrame:
+    """The line-up of the most recent race before this event.
+
+    A stand-in for the entry list when the weekend has not started. It misses
+    rookies and mid-season swaps, which is why the result is flagged as an
+    estimate rather than passed off as the real list.
+    """
+    empty = pd.DataFrame(columns=META_COLUMNS)
+    if history is None or history.empty:
+        return empty
+
+    earlier = history[
+        (history["year"] < year) | ((history["year"] == year) & (history["round"] < round_num))
+    ]
+    if earlier.empty:
+        return empty
+
+    last = earlier.sort_values(["year", "round"]).iloc[-1]
+    lineup = earlier[(earlier["year"] == last["year"]) & (earlier["round"] == last["round"])]
+    return (
+        lineup.reindex(columns=META_COLUMNS)
+        .drop_duplicates("driver_id")
+        .reset_index(drop=True)
+    )
 
 
 def _grid_from_prediction(predicted: pd.DataFrame) -> pd.DataFrame:
